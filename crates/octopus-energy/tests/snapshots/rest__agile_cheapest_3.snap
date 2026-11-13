@@ -1,0 +1,21 @@
+---
+source: crates/octopus-energy/tests/rest.rs
+expression: "cheapest(&slots, 3)"
+---
+[
+  {
+    "slot": "2026-10-25T13:00:00Z",
+    "inc_vat": -4.557,
+    "exc_vat": -4.34
+  },
+  {
+    "slot": "2026-10-25T12:30:00Z",
+    "inc_vat": -4.2945,
+    "exc_vat": -4.09
+  },
+  {
+    "slot": "2026-10-25T12:00:00Z",
+    "inc_vat": -4.2,
+    "exc_vat": -4.0
+  }
+]

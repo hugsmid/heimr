@@ -1,0 +1,21 @@
+{
+  "data": null,
+  "errors": [
+    {
+      "message": "You have made too many requests.",
+      "locations": [
+        {
+          "line": 2,
+          "column": 3
+        }
+      ],
+      "path": [
+        "smartMeterTelemetry"
+      ],
+      "extensions": {
+        "errorType": "APPLICATION",
+        "errorCode": "KT-CT-1199"
+      }
+    }
+  ]
+}

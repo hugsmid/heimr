@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 149bd146bbeae64e9b4298f2420c985a0aa4ec9db210f4bbfbc40d88a74b10a3 # shrinks to ops = [Submit { advance_s: 92, adapter: 0, zone: 0, target: 10.0, kind: 4 }, Restart(0)], modes = [false, false, false], band = (5.0, 0.0), min_interval_s = 1, max_per_hour = 1, max_hold_s = 1, hold_s = 0, allow_off = false

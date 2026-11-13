@@ -1,0 +1,60 @@
+---
+source: crates/octopus-energy/tests/kraken.rs
+expression: t
+---
+[
+  {
+    "readAt": "2026-11-12T09:00:00Z",
+    "consumption": 4321139.0,
+    "consumptionDelta": 41.0,
+    "demand": 492.0,
+    "export": 0.0,
+    "costDelta": 0.9963,
+    "costDeltaWithTax": 1.0461
+  },
+  {
+    "readAt": "2026-11-12T09:05:00Z",
+    "consumption": 4321178.5,
+    "consumptionDelta": 39.5,
+    "demand": 474.0,
+    "export": 0.0,
+    "costDelta": 0.9599,
+    "costDeltaWithTax": 1.0078
+  },
+  {
+    "readAt": "2026-11-12T09:10:00Z",
+    "consumption": 4321340.75,
+    "consumptionDelta": 162.25,
+    "demand": 1947.0,
+    "export": 0.0,
+    "costDelta": 3.9427,
+    "costDeltaWithTax": 4.1398
+  },
+  {
+    "readAt": "2026-11-12T09:15:00Z",
+    "consumption": 4321498.75,
+    "consumptionDelta": 158.0,
+    "demand": 1896.0,
+    "export": null,
+    "costDelta": 3.8394,
+    "costDeltaWithTax": 4.0314
+  },
+  {
+    "readAt": "2026-11-12T09:20:00Z",
+    "consumption": 4321539.5,
+    "consumptionDelta": 40.75,
+    "demand": null,
+    "export": null,
+    "costDelta": 0.9902,
+    "costDeltaWithTax": 1.0397
+  },
+  {
+    "readAt": "2026-11-12T09:25:00Z",
+    "consumption": 4321577.5,
+    "consumptionDelta": 38.0,
+    "demand": 456.0,
+    "export": null,
+    "costDelta": 0.9234,
+    "costDeltaWithTax": 0.9696
+  }
+]

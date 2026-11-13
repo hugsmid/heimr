@@ -1,0 +1,18 @@
+{
+  "data": {
+    "obtainKrakenToken": {
+      "token": "eyJ0eXAiOiJKV1QifQ.FAKE.FIXTURE",
+      "refreshExpiresIn": 1794240000,
+      "payload": {
+        "sub": "kraken|account-user:0000000",
+        "gty": "API-KEY",
+        "email": "user@example.com",
+        "tokenUse": "access",
+        "iss": "https://api.octopus.energy/v1/graphql/",
+        "iat": 1793635200,
+        "exp": 4102444800,
+        "origIat": 1793635200
+      }
+    }
+  }
+}

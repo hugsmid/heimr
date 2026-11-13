@@ -1,0 +1,55 @@
+{
+  "count": 3,
+  "next": "https://api.octopus.energy/v1/products/?is_variable=true&page=2",
+  "previous": null,
+  "results": [
+    {
+      "code": "AGILE-24-10-01",
+      "direction": "IMPORT",
+      "full_name": "Agile Octopus October 2024 v1",
+      "display_name": "Agile Octopus",
+      "description": "Hand-built fixture.",
+      "is_variable": true,
+      "is_green": false,
+      "is_tracker": false,
+      "is_prepay": false,
+      "is_business": false,
+      "is_restricted": false,
+      "term": null,
+      "available_from": "2024-10-01T00:00:00Z",
+      "available_to": null,
+      "links": [
+        {
+          "href": "https://api.octopus.energy/v1/products/AGILE-24-10-01/",
+          "method": "GET",
+          "rel": "self"
+        }
+      ],
+      "brand": "OCTOPUS_ENERGY"
+    },
+    {
+      "code": "AGILE-OUTGOING-19-05-13",
+      "direction": "EXPORT",
+      "full_name": "Agile Outgoing Octopus May 2019",
+      "display_name": "Agile Outgoing Octopus",
+      "description": "Hand-built fixture.",
+      "is_variable": true,
+      "is_green": false,
+      "is_tracker": false,
+      "is_prepay": false,
+      "is_business": false,
+      "is_restricted": false,
+      "term": null,
+      "available_from": "2019-05-13T00:00:00Z",
+      "available_to": null,
+      "links": [
+        {
+          "href": "https://api.octopus.energy/v1/products/AGILE-OUTGOING-19-05-13/",
+          "method": "GET",
+          "rel": "self"
+        }
+      ],
+      "brand": "OCTOPUS_ENERGY"
+    }
+  ]
+}

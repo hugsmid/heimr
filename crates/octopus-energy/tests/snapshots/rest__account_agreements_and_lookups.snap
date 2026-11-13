@@ -1,0 +1,65 @@
+---
+source: crates/octopus-energy/tests/rest.rs
+expression: acc
+---
+{
+  "number": "A-00000000",
+  "properties": [
+    {
+      "id": 1000001,
+      "moved_in_at": "2020-01-01T00:00:00Z",
+      "moved_out_at": null,
+      "electricity_meter_points": [
+        {
+          "mpan": "0000000000000",
+          "profile_class": 1,
+          "consumption_standard": 2700.0,
+          "is_export": false,
+          "meters": [
+            {
+              "serial_number": "00A0000000",
+              "registers": [
+                {
+                  "identifier": "1",
+                  "rate": "STANDARD",
+                  "is_settlement_register": true
+                }
+              ]
+            }
+          ],
+          "agreements": [
+            {
+              "tariff_code": "E-1R-VAR-22-11-01-K",
+              "valid_from": "2023-01-01T00:00:00Z",
+              "valid_to": "2025-01-01T00:00:00Z"
+            },
+            {
+              "tariff_code": "E-1R-AGILE-24-10-01-K",
+              "valid_from": "2025-01-01T00:00:00Z",
+              "valid_to": null
+            }
+          ]
+        }
+      ],
+      "gas_meter_points": [
+        {
+          "mprn": "0000000000",
+          "consumption_standard": 11500.0,
+          "meters": [
+            {
+              "serial_number": "G4A00000000000",
+              "registers": []
+            }
+          ],
+          "agreements": [
+            {
+              "tariff_code": "G-1R-VAR-22-11-01-K",
+              "valid_from": "2023-01-01T00:00:00Z",
+              "valid_to": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

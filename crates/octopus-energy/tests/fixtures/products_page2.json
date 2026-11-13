@@ -1,0 +1,31 @@
+{
+  "count": 3,
+  "next": null,
+  "previous": "https://api.octopus.energy/v1/products/?is_variable=true&page=1",
+  "results": [
+    {
+      "code": "VAR-22-11-01",
+      "direction": "IMPORT",
+      "full_name": "Flexible Octopus November 2022 v1",
+      "display_name": "Flexible Octopus",
+      "description": "Hand-built fixture.",
+      "is_variable": true,
+      "is_green": false,
+      "is_tracker": false,
+      "is_prepay": false,
+      "is_business": false,
+      "is_restricted": false,
+      "term": null,
+      "available_from": "2022-11-01T00:00:00Z",
+      "available_to": null,
+      "links": [
+        {
+          "href": "https://api.octopus.energy/v1/products/VAR-22-11-01/",
+          "method": "GET",
+          "rel": "self"
+        }
+      ],
+      "brand": "OCTOPUS_ENERGY"
+    }
+  ]
+}

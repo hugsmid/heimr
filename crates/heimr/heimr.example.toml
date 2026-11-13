@@ -1,0 +1,77 @@
+# heimr example configuration. Every value here is fictional.
+# Validate with: heimr check-config heimr.example.toml
+# Unknown keys are errors. Commented keys show their defaults.
+
+[heimr]
+# Persistent state: the audit journal in <state_dir>/audit/ and
+# <state_dir>/adapters/<instance>/ for each adapter instance.
+state_dir = "/var/lib/heimr"
+# How long adapters get to stop after SIGINT/SIGTERM.
+shutdown_grace = "10s"
+
+[log]
+# tracing filter; RUST_LOG overrides it.
+filter = "info"
+
+# Limits the actuator applies to every command, for every instance.
+# Setpoints outside 5.0..=30.0 °C cannot be represented at all; the band
+# here narrows them further.
+[safety]
+setpoint_min = 16.0
+setpoint_max = 22.0
+# Also the hold-off after start: no command (except resuming the schedule)
+# to any zone or device for this long after heimr starts.
+min_command_interval = "5m"
+max_commands_per_hour = 12
+# Longest timed hold a command may ask for (at most 24h). Overrides end at
+# the device's next schedule change or after their hold, never open-ended.
+max_hold = "2h"
+# Also governs switching off devices listed as heating_critical below.
+allow_heating_off = false
+
+# Every command decision is appended to a JSON-lines journal and fsynced
+# before the command is delivered.
+[audit]
+# max_file_bytes = 16777216   # start a new file at 16 MiB
+# retain_files = 64           # the newest 64 files are never deleted
+# append_timeout = "2s"       # withhold the command if the write is slower
+
+# A failing adapter instance is marked unhealthy and restarted with
+# exponential backoff and jitter; a fatal error keeps it down, and so do
+# repeated panics. Other instances keep running.
+[supervision]
+# backoff_initial = "1s"
+# backoff_max = "5m"
+# reset_after = "10m"         # a run this long resets the backoff
+# max_consecutive_panics = 5  # panics without such a run before it stays down
+
+[sinks]
+# Log every record (readings at debug level, events at info).
+logging = true
+
+# One section per adapter instance. `type` names the adapter kind; several
+# instances of one kind may run. The section name is the instance name,
+# stamped as the source of everything it emits. Commands are only delivered
+# with mode = "live"; the default, "shadow", audits every command and
+# delivers none.
+[adapters.demo]
+type = "demo"
+enabled = true
+mode = "shadow"
+interval = "1m"
+zones = ["zone-a", "zone-b"]
+initial_target = 19.0
+schedule_block = "3h"
+seed = 1
+
+# Optional, per instance: may only narrow [safety], never widen it.
+[adapters.demo.safety]
+setpoint_max = 21.0
+# Devices of this instance whose switching off counts as turning heating off.
+# heating_critical = ["plug-1"]
+
+# A second instance of the same kind, disabled.
+[adapters.demo-b]
+type = "demo"
+enabled = false
+zones = ["zone-c"]

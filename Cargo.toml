@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hugsmid/heimr"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6", features = ["derive", "env"] }
+insta = { version = "1.49", features = ["json", "redactions"] }
+jiff = { version = "0.2.43", features = ["serde"] }
+jiff-sqlx = { version = "0.2.2", features = ["postgres"] }
+proptest = "1.12"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls", "http2", "charset", "system-proxy"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_ignored = "0.1.14"
+serde_json = "1.0.154"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "json"] }
+testcontainers = "0.28"
+thiserror = "2.0.21"
+toml = "1.2.1"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+url = "2.5.8"
+wiremock = "0.6.5"
+
+# Workspace crates.
+heimr-core = { path = "crates/heimr-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+# insta/similar are much faster with opt-level in dev
+[profile.dev.package]
+insta.opt-level = 3
+similar.opt-level = 3

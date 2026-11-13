@@ -1,0 +1,10 @@
+title = "heimr gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "octopus-api-key"
+description = "Octopus Energy API key"
+regex = '''sk_live_[A-Za-z0-9]{24,}'''
+keywords = ["sk_live_"]

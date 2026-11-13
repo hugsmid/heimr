@@ -1,0 +1,21 @@
+---
+source: crates/octopus-energy/tests/rest.rs
+expression: "&rows[..3]"
+---
+[
+  {
+    "consumption": 0.104,
+    "interval_start": "2026-06-30T23:00:00Z",
+    "interval_end": "2026-06-30T23:30:00Z"
+  },
+  {
+    "consumption": 0.3,
+    "interval_start": "2026-06-30T23:30:00Z",
+    "interval_end": "2026-07-01T00:00:00Z"
+  },
+  {
+    "consumption": 0.159,
+    "interval_start": "2026-07-01T00:00:00Z",
+    "interval_end": "2026-07-01T00:30:00Z"
+  }
+]

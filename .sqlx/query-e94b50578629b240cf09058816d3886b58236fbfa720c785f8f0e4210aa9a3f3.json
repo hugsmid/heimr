@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CALL refresh_continuous_aggregate($1::text::regclass, $2::timestamptz, $3::timestamptz)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e94b50578629b240cf09058816d3886b58236fbfa720c785f8f0e4210aa9a3f3"
+}

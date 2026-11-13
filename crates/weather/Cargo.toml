@@ -1,0 +1,32 @@
+[package]
+name = "weather"
+version = "0.1.0"
+description = "Client for the Open-Meteo forecast, historical-weather and historical-forecast APIs: typed hourly rows in UTC, plus heating degree-days."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["weather", "open-meteo", "forecast", "degree-days"]
+categories = ["api-bindings"]
+
+[lints]
+workspace = true
+
+[dependencies]
+jiff.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+insta.workspace = true
+proptest.workspace = true
+tokio.workspace = true
+wiremock.workspace = true

@@ -1,0 +1,9 @@
+---
+source: crates/weather/tests/client.rs
+expression: dd
+---
+{
+  "value": 26.35,
+  "hours": 47,
+  "missing_hours": 1
+}

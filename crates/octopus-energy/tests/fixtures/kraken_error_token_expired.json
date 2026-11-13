@@ -1,0 +1,12 @@
+{
+  "data": null,
+  "errors": [
+    {
+      "message": "Signature of the JWT has expired.",
+      "extensions": {
+        "errorType": "AUTHORIZATION",
+        "errorCode": "KT-CT-1124"
+      }
+    }
+  ]
+}

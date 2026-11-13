@@ -1,0 +1,4 @@
+{
+ "error": true,
+ "reason": "Cannot initialize SurfaceVariableOrPressureVariable from invalid String value temperature_3m for key hourly"
+}

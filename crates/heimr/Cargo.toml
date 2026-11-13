@@ -1,0 +1,35 @@
+[package]
+name = "heimr"
+version = "0.1.0"
+description = "A config-driven home brain: wires adapters, the command safety layer and sinks together. Library plus default binary."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["home-automation", "smart-home", "heating"]
+categories = ["command-line-utilities"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "heimr"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+heimr-core.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_ignored.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["signal", "sync"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["signal", "sync", "test-util"] }

@@ -1,0 +1,52 @@
+---
+source: crates/octopus-energy/tests/rest.rs
+expression: p
+---
+{
+  "code": "AGILE-24-10-01",
+  "direction": "IMPORT",
+  "full_name": "Agile Octopus October 2024 v1",
+  "display_name": "Agile Octopus",
+  "description": "Hand-built fixture.",
+  "is_variable": true,
+  "is_green": false,
+  "is_tracker": false,
+  "is_prepay": false,
+  "is_business": false,
+  "is_restricted": false,
+  "term": null,
+  "available_from": "2024-10-01T00:00:00Z",
+  "available_to": null,
+  "brand": "OCTOPUS_ENERGY",
+  "tariffs_active_at": "2026-11-12T10:00:00.123456Z",
+  "single_register_electricity_tariffs": {
+    "_A": {
+      "direct_debit_monthly": {
+        "code": "E-1R-AGILE-24-10-01-A",
+        "standing_charge_exc_vat": 50.79,
+        "standing_charge_inc_vat": 53.3295,
+        "standard_unit_rate_exc_vat": 22.18,
+        "standard_unit_rate_inc_vat": 23.289,
+        "day_unit_rate_exc_vat": null,
+        "day_unit_rate_inc_vat": null,
+        "night_unit_rate_exc_vat": null,
+        "night_unit_rate_inc_vat": null
+      }
+    },
+    "_B": {
+      "direct_debit_monthly": {
+        "code": "E-1R-AGILE-24-10-01-B",
+        "standing_charge_exc_vat": 50.79,
+        "standing_charge_inc_vat": 53.3295,
+        "standard_unit_rate_exc_vat": 22.18,
+        "standard_unit_rate_inc_vat": 23.289,
+        "day_unit_rate_exc_vat": null,
+        "day_unit_rate_inc_vat": null,
+        "night_unit_rate_exc_vat": null,
+        "night_unit_rate_inc_vat": null
+      }
+    }
+  },
+  "dual_register_electricity_tariffs": {},
+  "single_register_gas_tariffs": {}
+}

@@ -1,0 +1,33 @@
+---
+source: crates/octopus-energy/tests/kraken.rs
+expression: inv
+---
+{
+  "electricity": [
+    {
+      "mpan": "0000000000000",
+      "direction": "IMPORT",
+      "meters": [
+        {
+          "serial_number": "00A0000000",
+          "import_device_id": "00-00-00-00-00-00-00-01",
+          "gas_device_id": null,
+          "consumption_units": null
+        }
+      ]
+    }
+  ],
+  "gas": [
+    {
+      "mprn": "0000000000",
+      "meters": [
+        {
+          "serial_number": "G4A00000000000",
+          "import_device_id": null,
+          "gas_device_id": "00-00-00-00-00-00-00-02",
+          "consumption_units": "m³"
+        }
+      ]
+    }
+  ]
+}

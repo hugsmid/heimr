@@ -1,0 +1,38 @@
+{
+  "data": {
+    "account": {
+      "electricityAgreements": [
+        {
+          "meterPoint": {
+            "mpan": "0000000000000",
+            "direction": "IMPORT",
+            "meters": [
+              {
+                "serialNumber": "00A0000000",
+                "smartImportElectricityMeter": {
+                  "deviceId": "00-00-00-00-00-00-00-01"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "gasAgreements": [
+        {
+          "meterPoint": {
+            "mprn": "0000000000",
+            "meters": [
+              {
+                "serialNumber": "G4A00000000000",
+                "consumptionUnits": "m³",
+                "smartGasMeter": {
+                  "deviceId": "00-00-00-00-00-00-00-02"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

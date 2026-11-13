@@ -1,0 +1,5 @@
+---
+source: crates/octopus-energy/tests/rest.rs
+expression: (total * 1000.0).round() / 1000.0
+---
+8.89

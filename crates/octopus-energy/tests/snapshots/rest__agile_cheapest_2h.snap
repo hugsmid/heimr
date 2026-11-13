@@ -1,0 +1,8 @@
+---
+source: crates/octopus-energy/tests/rest.rs
+expression: "(window.first().map(|s| s.slot), mean)"
+---
+[
+  "2026-10-24T23:00:00Z",
+  2.2365
+]
