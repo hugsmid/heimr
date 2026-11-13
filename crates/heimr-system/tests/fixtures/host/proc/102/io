@@ -1,0 +1,4 @@
+rchar: 1
+wchar: 1
+read_bytes: 0
+write_bytes: 4096

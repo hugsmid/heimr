@@ -2,6 +2,14 @@
 # Validate with: heimr check-config heimr.example.toml
 # Unknown keys are errors. Commented keys show their defaults.
 
+# Required, no defaults: where the home is, for calendars and prices.
+# Timestamps are always UTC; the zone decides where local days and months
+# start and how times are shown. Prices are in the currency's major unit
+# (e.g. EUR per kWh).
+[site]
+time_zone = "Europe/Berlin"   # IANA time zone name
+currency = "EUR"              # ISO 4217 code
+
 [heimr]
 # Persistent state: the audit journal in <state_dir>/audit/ and
 # <state_dir>/adapters/<instance>/ for each adapter instance.
@@ -75,3 +83,10 @@ setpoint_max = 21.0
 type = "demo"
 enabled = false
 zones = ["zone-c"]
+
+# The machine's own health (CPU, memory, disks, network, temperatures,
+# processes); read-only. See the heimr-system crate for every key.
+[adapters.host]
+type = "system"
+interval = "10s"
+top = 5

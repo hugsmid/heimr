@@ -46,14 +46,16 @@
               ./Cargo.lock
               ./deny.toml
               ./clippy.toml
-              ./.sqlx
               # crates/heimr/tests/guide.rs checks the guide against the code.
               ./docs/writing-an-adapter.md
+              # heimr-testkit compiles and tests the adapter template.
+              ./templates
+              # Hand-built /proc and /sys trees (files without extensions).
+              ./crates/heimr-system/tests/fixtures
               (craneLib.fileset.commonCargoSources ./crates)
               (lib.fileset.fileFilter (
                 f:
                 lib.any f.hasExt [
-                  "sql"
                   "snap"
                   "json"
                   "md"
@@ -68,8 +70,6 @@
             pname = "heimr-workspace";
             version = "0.0.0";
             strictDeps = true;
-            # sqlx: use the checked-in offline query cache, never a live DB.
-            SQLX_OFFLINE = "true";
             # jiff needs a tz database in tests.
             TZDIR = "${pkgs.tzdata}/share/zoneinfo";
             # rustls-platform-verifier needs a CA bundle even for local tests.
@@ -127,13 +127,10 @@
               cargo-deny
               cargo-insta
               cargo-nextest
-              sqlx-cli
               gitleaks
-              postgresql_17
               nixfmt
               jq
             ];
-            SQLX_OFFLINE = "true";
           };
         }
       );
@@ -154,8 +151,6 @@
               cargoClippyExtraArgs = "--workspace --all-targets -- --deny warnings";
             }
           );
-          # Docker-backed tests skip themselves inside Nix builds; CI runs
-          # them separately with REQUIRE_DOCKER_TESTS=1.
           test = craneLib.cargoTest (
             commonArgs
             // {

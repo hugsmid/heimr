@@ -1,0 +1,12 @@
+{
+  "interactions": [
+    {
+      "request": { "method": "GET", "path": "/status" },
+      "responses": [
+        { "status": 200, "headers": { "content-type": "application/json" }, "json": { "temperature": 19.5, "humidity": 44.0 } },
+        { "status": 200, "headers": { "content-type": "application/json" }, "json": { "temperature": 19.75, "humidity": 43.5 } },
+        { "status": 200, "headers": { "content-type": "application/json" }, "json": { "temperature": 20.0, "humidity": 43.0 } }
+      ]
+    }
+  ]
+}

@@ -10,7 +10,8 @@
 //!   runs it through the object-safe [`AdapterFactory`]. Everything an
 //!   instance may touch arrives in an [`AdapterContext`]: its typed config,
 //!   an emitter for [`Record`]s, a command handle, a [`Clock`], a
-//!   [`Shutdown`] signal and a state directory. It never sees the bus, the
+//!   [`Shutdown`] signal, a state directory and the [`Site`] (time zone
+//!   and currency, from the site's configuration). It never sees the bus, the
 //!   store or other adapters, and cannot emit as anyone else.
 //! - **Telemetry for free** ([`AdapterStats`]): the core counts what each
 //!   instance emits, every command offered, delivered, shadowed, rejected or
@@ -67,6 +68,7 @@ pub mod domain;
 pub mod id;
 pub mod record;
 pub mod shutdown;
+pub mod site;
 pub mod telemetry;
 pub mod units;
 
@@ -92,6 +94,7 @@ pub use domain::{
 pub use id::{CommandId, CommandIdError, CommandIds, DeviceId, IdError, ZoneId};
 pub use record::{Envelope, Event, Quality, Reading, ReadingError, Record, StateClass, StateKey};
 pub use shutdown::{Shutdown, ShutdownTrigger, shutdown_channel};
+pub use site::{Currency, Site, SiteError};
 pub use telemetry::{
     AdapterStats, HealthReporter, HealthStatus, InstanceStats, Metrics, RunState, StatsHandle,
 };

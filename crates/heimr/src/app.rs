@@ -11,7 +11,7 @@ use heimr_core::{
     ACTUATOR, ActorError, Actuator, ActuatorError, Adapter, AdapterDescriptor, AdapterError,
     AdapterFactory, AdapterInstance, AuditLog, Capabilities, CommandSubmitter, ContextParts,
     Emitter, Envelope, Event, InstanceSpec, Mode, RegisterError, SharedClock, Shutdown,
-    ShutdownTrigger, StatsHandle, SystemClock, TypedFactory, shutdown_channel,
+    ShutdownTrigger, Site, StatsHandle, SystemClock, TypedFactory, shutdown_channel,
 };
 use jiff::SignedDuration;
 use serde_json::json;
@@ -149,11 +149,13 @@ impl AppBuilder {
         self
     }
 
-    /// Register the adapter kinds that ship with heimr (currently
-    /// [`Demo`](crate::demo::Demo)).
+    /// Register the adapter kinds that ship with heimr: `demo`
+    /// ([`Demo`](crate::demo::Demo)) and `system` (host metrics,
+    /// [`heimr_system::System`]).
     #[must_use]
     pub fn public_adapters(self) -> Self {
         self.adapter::<crate::demo::Demo>()
+            .adapter::<heimr_system::System>()
     }
 
     /// Add a sink (in addition to the logging sink, if enabled in config).
@@ -196,6 +198,7 @@ impl AppBuilder {
             return Err(Error::Registration(p.clone()));
         }
         self.config.validate()?;
+        let site = self.config.site()?;
         let mut out = Vec::new();
         for (name, section) in &self.config.adapters {
             let Some(factory) = self.kinds.get(&section.kind) else {
@@ -212,7 +215,7 @@ impl AppBuilder {
             };
             let descriptor = factory.descriptor();
             let instance = factory
-                .prepare(&section.settings)
+                .prepare(&section.settings, &site)
                 .await
                 .map_err(|e| adapter_error(name, e))?;
             let capabilities = instance.capabilities();
@@ -314,6 +317,7 @@ impl AppBuilder {
         }
         let (trigger, shutdown) = shutdown_channel();
         Ok(App {
+            site: config.site()?,
             grace: self.config.heimr.shutdown_grace,
             supervision: self.config.supervision,
             supervised,
@@ -347,6 +351,7 @@ struct Supervised {
 /// [`App::telemetry`], [`App::shutdown_trigger`]) before calling
 /// [`App::run`].
 pub struct App {
+    site: Site,
     grace: SignedDuration,
     supervision: Supervision,
     supervised: Vec<Supervised>,
@@ -401,6 +406,11 @@ impl App {
         self.trigger.clone()
     }
 
+    /// The site's time zone and currency, from `[site]`.
+    pub fn site(&self) -> &Site {
+        &self.site
+    }
+
     /// Enabled instances and their modes.
     pub fn adapters(&self) -> Vec<(String, Mode)> {
         self.supervised
@@ -423,6 +433,7 @@ impl App {
     /// an error.
     pub async fn run_until(self, stop: impl Future<Output = ()> + Send) -> Result<(), Error> {
         let Self {
+            site,
             grace,
             supervision,
             supervised,
@@ -457,6 +468,7 @@ impl App {
             events: Emitter::core(APP_SOURCE, records_tx),
             grace: Duration::try_from(grace).unwrap_or_default(),
             policy: supervision,
+            site,
         };
         let mut tasks = JoinSet::new();
         let mut names = BTreeMap::new();
@@ -516,6 +528,7 @@ struct Env {
     events: Emitter,
     grace: Duration,
     policy: Supervision,
+    site: Site,
 }
 
 impl Env {
@@ -597,7 +610,7 @@ async fn supervise(mut s: Supervised, env: Env) {
         }
         let instance = match s.first.take() {
             Some(i) => Ok(i),
-            None => s.factory.prepare(&s.settings).await,
+            None => s.factory.prepare(&s.settings, &env.site).await,
         };
         let instance = match instance {
             Ok(i) if s.capabilities.includes(&i.capabilities()) => i,
@@ -635,6 +648,7 @@ async fn supervise(mut s: Supervised, env: Env) {
             s.state_dir.clone(),
             // The adapter may report health and metrics, not run state.
             s.stats.for_instance(),
+            env.site.clone(),
         )
         .with_commands(commands);
         s.stats.run_started(env.clock.now());

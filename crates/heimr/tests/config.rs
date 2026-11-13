@@ -23,8 +23,15 @@ impl CheckNow for heimr::AppBuilder {
     }
 }
 
+const SITE: &str = "\n[site]\ntime_zone = \"America/New_York\"\ncurrency = \"USD\"\n";
+
+/// Parse with a valid `[site]` appended.
+fn parse(toml: &str) -> Config {
+    Config::from_toml_str(&format!("{toml}{SITE}")).unwrap()
+}
+
 fn check(toml: &str) -> Result<Vec<heimr::AdapterPlan>, String> {
-    let config = Config::from_toml_str(toml).map_err(|e| e.to_string())?;
+    let config = Config::from_toml_str(&format!("{toml}{SITE}")).map_err(|e| e.to_string())?;
     App::builder(config)
         .public_adapters()
         .check_now()
@@ -37,14 +44,15 @@ fn example_config_is_valid() {
     let config = Config::load(path).unwrap();
     let plans = App::builder(config).public_adapters().check_now().unwrap();
     let names: Vec<_> = plans.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["demo", "demo-b"]);
+    assert_eq!(names, ["demo", "demo-b", "host"]);
     assert!(plans[0].enabled);
     assert!(!plans[1].enabled);
     assert!(
         plans.iter().all(|p| p.mode == Mode::Shadow),
         "the example must not enable live mode"
     );
-    assert!(plans.iter().all(|p| p.descriptor.kind == "demo"));
+    let kinds: Vec<_> = plans.iter().map(|p| p.descriptor.kind.as_str()).collect();
+    assert_eq!(kinds, ["demo", "demo", "system"]);
 }
 
 #[test]
@@ -68,7 +76,7 @@ fn instance_errors_name_the_key() {
     );
     assert_eq!(
         check("[adapters.x]\ntype = \"nope\"").unwrap_err(),
-        "adapters.x.type: no adapter kind \"nope\" in this build (available: demo)"
+        "adapters.x.type: no adapter kind \"nope\" in this build (available: demo, system)"
     );
     assert_eq!(
         check("[adapters.demo]\ntype = \"demo\"\nzones = []").unwrap_err(),
@@ -131,7 +139,7 @@ impl Adapter for Sensor {
 
 #[test]
 fn read_only_kinds_cannot_be_live() {
-    let config = Config::from_toml_str("[adapters.s]\ntype = \"sensor\"\nmode = \"live\"").unwrap();
+    let config = parse("[adapters.s]\ntype = \"sensor\"\nmode = \"live\"");
     let err = App::builder(config)
         .adapter::<Sensor>()
         .check_now()
@@ -154,6 +162,7 @@ impl AdapterFactory for RuntimeKind {
     fn prepare(
         &self,
         settings: &serde_json::Value,
+        _site: &heimr::core::Site,
     ) -> BoxFuture<Result<Box<dyn AdapterInstance>, AdapterError>> {
         // A real host would ask the other process here.
         let result = if settings.as_object().is_some_and(|o| !o.is_empty()) {
@@ -170,8 +179,7 @@ fn dynamic_kinds_register_and_validate() {
     let described = r#"{"kind": "remote-ventilation", "summary": "from another process",
         "capabilities": {"read": true, "write": ["fan_mode"], "fan_levels": {"min": 1, "max": 6}, "fan_presets": ["boost"]}}"#;
     let d: AdapterDescriptor = serde_json::from_str(described).unwrap();
-    let config =
-        Config::from_toml_str("[adapters.vent]\ntype = \"remote-ventilation\"\nx = 1").unwrap();
+    let config = parse("[adapters.vent]\ntype = \"remote-ventilation\"\nx = 1");
     let builder = App::builder(config).factory(RuntimeKind(d.clone()));
     assert_eq!(builder.kinds(), [d]);
     assert_eq!(

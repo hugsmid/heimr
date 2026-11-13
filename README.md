@@ -42,28 +42,28 @@ More detail: [`docs/architecture.md`](docs/architecture.md).
 | Piece | Path | What |
 |---|---|---|
 | Core | `crates/heimr-core` | Domain types, the adapter contract and the command safety layer |
-| Test kit | `crates/heimr-testkit` (upcoming) | Adapter conformance suite, record/replay harness, redaction helpers |
+| Test kit | `crates/heimr-testkit` | Adapter conformance suite, direct-drive harness, record/replay with redaction, snapshot rendering |
 | Adapters | `crates/<name>` | Generic protocols and public services (see below) |
-| Store | `crates/heimr-store` | Schema, migrations and idempotent writes |
 | App | `crates/heimr` | The application as a library (`App` builder, typed `Config`) plus a default binary with a synthetic `demo` adapter |
 | Example configuration | `crates/heimr/heimr.example.toml` | A minimal configuration that runs with fictional values |
 | NixOS modules | `nix/modules` (upcoming) | Reusable NixOS modules for the app and its supporting services, exported as flake `nixosModules` |
-| Adapter template | `templates/adapter` (upcoming) | Starting point for a new adapter crate |
+| Adapter template | `templates/adapter` | Starting point for a new adapter crate, with a conformance test |
 
-Integration crates are standalone client libraries; listing one here means the crate exists, nothing more. Neither client below is wired into the app as an adapter yet. Which adapters run is decided entirely by your configuration.
+Listing a crate here means it exists, nothing more. `octopus-energy` and `weather` are standalone client libraries, not yet wired into the app as adapters; `heimr-system` is an adapter, registered in the default binary. Which adapters run is decided entirely by your configuration.
 
 | Crate | Integration | State |
 |---|---|---|
 | `octopus-energy` | Energy prices and smart-meter data from Octopus Energy (UK): tariffs, half-hourly Agile prices, consumption, live demand | Client library; implemented and tested against hand-built fixtures |
 | `weather` | Weather observations and forecasts from Open-Meteo | Client library; implemented and tested against hand-built fixtures |
+| `heimr-system` | The machine's own health: CPU, memory, disks, network, temperatures, processes and services (Linux) | Adapter, registered in the default binary as `system`; tested against hand-built fixtures |
 
 Planned: price-aware planning of heating and switchable loads, derived analytics (cost, degree-days, heat-loss estimates), a provider-neutral LLM client for the assistant, and adapters for generic local protocols (HomeKit Accessory Protocol, Matter, ESPHome native API, MQTT).
 
 ## Status
 
-- **Exists:** the adapter contract (kinds, configured instances, typed commands with holds); the command safety layer (policy checks, rate limits, a durable audit journal written before delivery, shadow mode by default, a submit-only handle for deciders); per-instance supervision and telemetry; typed configuration and the `App` builder; a synthetic `demo` adapter; energy-price and weather clients; store schema and migrations.
-- **Next:** the test kit, the adapter template and reusable NixOS modules.
-- **Under evaluation:** the storage engine. A time-series database plus Parquet archive is the working assumption; alternatives with Parquet-native storage are being benchmarked. See [`docs/architecture.md`](docs/architecture.md#4-data-model-and-retention).
+- **Exists:** the adapter contract (kinds, configured instances, typed commands with holds); the command safety layer (policy checks, rate limits, a durable audit journal written before delivery, shadow mode by default, a submit-only handle for deciders); per-instance supervision and telemetry; typed configuration and the `App` builder; a synthetic `demo` adapter; a `system` adapter for host metrics; the adapter test kit and template; energy-price and weather clients.
+- **Next:** reusable NixOS modules.
+- **Under evaluation:** the storage engine. An embedded time-series engine plus a Parquet archive is the working assumption; candidates are being benchmarked. See [`docs/architecture.md`](docs/architecture.md#4-data-model-and-retention).
 - **Not started:** the recorder (writing records to the store), dashboard, planner logic, analytics, assistant, native protocol stacks.
 
 ## Getting started

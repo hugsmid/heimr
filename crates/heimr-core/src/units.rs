@@ -281,6 +281,15 @@ pub enum Unit {
     /// Hours (e.g. filter run time).
     #[serde(rename = "h")]
     Hour,
+    /// Seconds (durations, CPU time).
+    #[serde(rename = "s")]
+    Second,
+    /// Bytes (memory, storage, transferred data).
+    #[serde(rename = "B")]
+    Byte,
+    /// Bytes per second (throughput).
+    #[serde(rename = "B/s")]
+    BytePerSecond,
     /// Dimensionless count, level or ratio.
     #[serde(rename = "1")]
     Dimensionless,
@@ -304,6 +313,9 @@ impl Unit {
         Self::MetrePerSecond,
         Self::Millimetre,
         Self::Hour,
+        Self::Second,
+        Self::Byte,
+        Self::BytePerSecond,
         Self::Dimensionless,
     ];
 
@@ -325,6 +337,9 @@ impl Unit {
             Self::MetrePerSecond => "m/s",
             Self::Millimetre => "mm",
             Self::Hour => "h",
+            Self::Second => "s",
+            Self::Byte => "B",
+            Self::BytePerSecond => "B/s",
             Self::Dimensionless => "1",
         }
     }

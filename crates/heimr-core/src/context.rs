@@ -13,6 +13,7 @@ use crate::domain::Command;
 use crate::id::{self, CommandId, DeviceId, IdError};
 use crate::record::{Envelope, Event, Reading, ReadingError, Record};
 use crate::shutdown::Shutdown;
+use crate::site::Site;
 use crate::telemetry::{HealthReporter, InstanceStats, Metrics, StatsHandle};
 use crate::units::{Metric, Unit};
 
@@ -397,6 +398,8 @@ pub struct ContextParts {
     /// The instance's stats, restricted to what an adapter may change
     /// ([`StatsHandle::for_instance`]).
     pub stats: InstanceStats,
+    /// The site's time zone and currency.
+    pub site: Site,
 }
 
 impl ContextParts {
@@ -407,6 +410,7 @@ impl ContextParts {
         shutdown: Shutdown,
         state_dir: PathBuf,
         stats: InstanceStats,
+        site: Site,
     ) -> Self {
         Self {
             emitter,
@@ -415,6 +419,7 @@ impl ContextParts {
             shutdown,
             state_dir,
             stats,
+            site,
         }
     }
 
@@ -520,6 +525,12 @@ impl<C> AdapterContext<C> {
     /// Private, persistent state directory.
     pub fn state_dir(&self) -> &Path {
         &self.parts.state_dir
+    }
+
+    /// The site's time zone (for calendar days and presentation; records
+    /// stay UTC) and currency (prices in major units).
+    pub fn site(&self) -> &Site {
+        &self.parts.site
     }
 
     /// Report health in one line; see [`HealthReporter`].

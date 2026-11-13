@@ -79,7 +79,7 @@ pub fn heating_degree_days(obs: &[Observation], base_c: f64) -> DegreeDays {
     dd
 }
 
-/// Heating degree-days per calendar day in `tz` (e.g. `Europe/London`), in
+/// Heating degree-days per calendar day in `tz` (e.g. `Europe/Berlin`), in
 /// date order. A row belongs to the local date of its timestamp, so a
 /// complete local day has 23, 24 or 25 hours.
 pub fn daily_heating_degree_days(
@@ -144,10 +144,11 @@ mod tests {
 
     #[test]
     fn daily_split_follows_local_days_across_dst() {
-        let uk = TimeZone::get("Europe/London").unwrap();
-        // 2026-10-25 (clocks go back) is 25 hours long in the UK.
-        let rows = obs("2026-10-24T23:00:00Z", &[Some(5.5); 25 + 24]);
-        let days = daily_heating_degree_days(&rows, 15.5, &uk);
+        let tz = TimeZone::get("Europe/Berlin").unwrap();
+        // 2026-10-25 (clocks go back) is 25 hours long there; local midnight
+        // is 22:00 UTC the day before (CEST, UTC+2).
+        let rows = obs("2026-10-24T22:00:00Z", &[Some(5.5); 25 + 24]);
+        let days = daily_heating_degree_days(&rows, 15.5, &tz);
         let hours: Vec<_> = days
             .iter()
             .map(|(d, dd)| (d.to_string(), dd.hours))

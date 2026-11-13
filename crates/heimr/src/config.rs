@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use heimr_core::id::{is_reserved_name, validate_name};
-use heimr_core::{DeviceId, InstanceSafety, Mode, SafetyPolicy, SetpointBand};
+use heimr_core::{DeviceId, InstanceSafety, Mode, SafetyPolicy, SetpointBand, Site};
 use jiff::SignedDuration;
 use serde::Deserialize;
 
@@ -58,6 +58,10 @@ impl ConfigError {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
+    /// The site's time zone and currency. Required; `None` only so that a
+    /// missing section is reported with what to set ([`Config::site`]).
+    #[serde(default)]
+    pub site: Option<SiteSection>,
     /// General settings.
     #[serde(default)]
     pub heimr: General,
@@ -80,6 +84,30 @@ pub struct Config {
     #[serde(default)]
     pub adapters: BTreeMap<String, InstanceSection>,
 }
+
+/// `[site]`: where the home is, as far as calendars and prices are
+/// concerned. Both keys are required and have no default.
+///
+/// ```toml
+/// [site]
+/// time_zone = "Europe/Berlin"   # IANA name: local days and presentation
+/// currency = "EUR"              # ISO 4217: prices are in its major unit
+/// ```
+///
+/// Timestamps are always stored and exchanged in UTC; the zone only decides
+/// where local days and months start and how times are shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SiteSection {
+    /// IANA time zone name, e.g. `Europe/Berlin`.
+    pub time_zone: Option<String>,
+    /// ISO 4217 currency code, e.g. `EUR`.
+    pub currency: Option<String>,
+}
+
+const SET_ZONE: &str = "required: the site's IANA time zone, e.g. time_zone = \"America/New_York\"";
+const SET_CURRENCY: &str = "required: the site's ISO 4217 currency, e.g. currency = \"EUR\"";
 
 /// `[heimr]`
 #[derive(Debug, Clone, Deserialize)]
@@ -410,6 +438,29 @@ impl Config {
         Ok(config)
     }
 
+    /// The site's time zone and currency from `[site]`; an error naming
+    /// the key to set if either is missing or invalid.
+    pub fn site(&self) -> Result<Site, ConfigError> {
+        let missing = |key: &str, what: &str| ConfigError::invalid(format!("site.{key}"), what);
+        let section = self.site.as_ref().ok_or_else(|| {
+            ConfigError::invalid(
+                "site",
+                "required: add a [site] section with time_zone (IANA name, e.g. \"Europe/Berlin\") and currency (ISO 4217, e.g. \"EUR\")",
+            )
+        })?;
+        let zone = section
+            .time_zone
+            .as_deref()
+            .ok_or_else(|| missing("time_zone", SET_ZONE))?;
+        let currency = section
+            .currency
+            .as_deref()
+            .ok_or_else(|| missing("currency", SET_CURRENCY))?;
+        heimr_core::Currency::new(currency)
+            .map_err(|e| ConfigError::invalid("site.currency", e.to_string()))?;
+        Site::new(zone, currency).map_err(|e| ConfigError::invalid("site.time_zone", e.to_string()))
+    }
+
     /// Read, parse and validate a TOML file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
@@ -424,6 +475,7 @@ impl Config {
     /// registered (those checks happen in
     /// [`AppBuilder::check`](crate::AppBuilder::check)).
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.site()?;
         if self.heimr.state_dir.as_os_str().is_empty() {
             return Err(ConfigError::invalid("heimr.state_dir", "must not be empty"));
         }
@@ -526,13 +578,47 @@ impl Config {
 mod tests {
     use super::*;
 
+    const SITE: &str = "\n[site]\ntime_zone = \"Europe/Berlin\"\ncurrency = \"EUR\"\n";
+
+    /// Parse with a valid `[site]` appended (after every other table).
+    fn parse(toml: &str) -> Result<Config, ConfigError> {
+        Config::from_toml_str(&format!("{toml}{SITE}"))
+    }
+
     fn err(toml: &str) -> String {
-        Config::from_toml_str(toml).unwrap_err().to_string()
+        parse(toml).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn site_is_required_and_validated() {
+        let raw = |s: &str| Config::from_toml_str(s).unwrap_err().to_string();
+        assert!(raw("").starts_with("site: required: add a [site] section"));
+        assert!(raw("[site]\ncurrency = \"EUR\"").starts_with("site.time_zone: required"));
+        assert!(
+            raw("[site]\ntime_zone = \"Europe/Berlin\"").starts_with("site.currency: required")
+        );
+        assert!(
+            raw("[site]\ntime_zone = \"Europe/Nowhere\"\ncurrency = \"EUR\"")
+                .starts_with("site.time_zone: unknown time zone")
+        );
+        assert!(
+            raw("[site]\ntime_zone = \"Europe/Berlin\"\ncurrency = \"eur\"")
+                .starts_with("site.currency: invalid currency")
+        );
+        assert!(
+            raw("[site]\ntime_zone = \"UTC\"\ncurrency = \"EUR\"\nlocale = \"x\"")
+                .contains("unknown field `locale`")
+        );
+        let site = parse("").unwrap().site().unwrap();
+        assert_eq!(
+            (site.time_zone_name(), site.currency().as_str()),
+            ("Europe/Berlin", "EUR")
+        );
     }
 
     #[test]
     fn empty_config_uses_safe_defaults() {
-        let c = Config::from_toml_str("").unwrap();
+        let c = parse("").unwrap();
         assert!(c.adapters.is_empty());
         let p = c.safety.policy().unwrap();
         assert_eq!(p, SafetyPolicy::default());
@@ -541,7 +627,7 @@ mod tests {
 
     #[test]
     fn instance_section_defaults_to_enabled_shadow() {
-        let c = Config::from_toml_str("[adapters.a]\ntype = \"demo\"\ninterval = \"1m\"").unwrap();
+        let c = parse("[adapters.a]\ntype = \"demo\"\ninterval = \"1m\"").unwrap();
         let s = &c.adapters["a"];
         assert_eq!(s.kind, "demo");
         assert!(s.enabled);
@@ -592,7 +678,7 @@ mod tests {
 
     #[test]
     fn instance_safety_only_narrows() {
-        let ok = Config::from_toml_str(
+        let ok = parse(
             "[adapters.a]\ntype = \"demo\"\n[adapters.a.safety]\nsetpoint_max = 20.0\nheating_critical = [\"boiler\"]",
         )
         .unwrap();

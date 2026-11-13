@@ -77,6 +77,9 @@ async fn run_demo(mode: Mode) -> Run {
     let dir = TempDir::new(mode.as_str());
     let config = Config::from_toml_str(&format!(
         r#"
+        [site]
+        time_zone = "Europe/Berlin"
+        currency = "EUR"
         [heimr]
         state_dir = "{}"
         [sinks]
@@ -385,6 +388,9 @@ async fn timed_hold_expires_on_the_device() {
     let dir = TempDir::new("hold");
     let config = Config::from_toml_str(&format!(
         r#"
+        [site]
+        time_zone = "Europe/Berlin"
+        currency = "EUR"
         [heimr]
         state_dir = "{}"
         [sinks]

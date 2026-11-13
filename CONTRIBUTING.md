@@ -19,7 +19,7 @@ Run before pushing:
 ```bash
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # store tests need Docker and are skipped without it
+cargo test --workspace
 cargo insta review              # accept snapshot changes deliberately
 nix flake check -L              # everything CI runs, hermetically
 ```

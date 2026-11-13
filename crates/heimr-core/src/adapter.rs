@@ -27,6 +27,7 @@ use crate::clock::BoxFuture;
 use crate::context::{AdapterContext, ContextParts, EmitError};
 use crate::domain::{CommandKind, FanMode};
 use crate::id::{self, IdError};
+use crate::site::Site;
 
 /// An inclusive range of fan levels an adapter accepts in
 /// [`FanMode::Manual`].
@@ -340,8 +341,9 @@ impl AdapterError {
 /// The typed adapter trait for Rust adapter authors.
 ///
 /// The app builds the adapter from its instance section with
-/// [`Adapter::new`] (no I/O: this also runs for `check-config` and before
-/// every restart), then calls [`Adapter::run`] with an [`AdapterContext`].
+/// [`Adapter::build`] (which calls [`Adapter::new`] unless overridden; no
+/// I/O: this also runs for `check-config` and before every restart), then
+/// calls [`Adapter::run`] with an [`AdapterContext`].
 /// Everything the adapter may touch comes through the context; it never sees
 /// the bus, the store or other adapters. Register it with
 /// `App::builder(..).adapter::<A>()`, which wraps it in a [`TypedFactory`].
@@ -411,6 +413,15 @@ pub trait Adapter: Sized + Send + 'static {
     /// Build the adapter from its config. Validate here; do no I/O.
     fn new(config: &Self::Config) -> Result<Self, AdapterError>;
 
+    /// Build the adapter for a site (its time zone and currency). The app
+    /// calls this, not [`Adapter::new`]; the default ignores the site and
+    /// calls `new`. Override it only to validate against or keep the site
+    /// at build time; at run time it is [`AdapterContext::site`].
+    fn build(config: &Self::Config, site: &Site) -> Result<Self, AdapterError> {
+        let _ = site;
+        Self::new(config)
+    }
+
     /// What this instance can do, if it depends on its config (e.g. the
     /// levels of the configured device model). Must not exceed the
     /// descriptor. Defaults to the descriptor's capabilities.
@@ -440,8 +451,8 @@ pub trait AdapterFactory: Send + Sync + fmt::Debug + 'static {
     fn descriptor(&self) -> AdapterDescriptor;
 
     /// Validate an instance's settings (a JSON object of the adapter's own
-    /// keys) and build an instance ready to run, including what it can do
-    /// ([`AdapterInstance::capabilities`]). Asynchronous and fallible so a
+    /// keys) for `site` and build an instance ready to run, including what
+    /// it can do ([`AdapterInstance::capabilities`]). Asynchronous and fallible so a
     /// host for an adapter in another process can validate the settings and
     /// learn the capabilities over its protocol; it must not start the
     /// adapter's work. Unknown keys must be reported as
@@ -450,6 +461,7 @@ pub trait AdapterFactory: Send + Sync + fmt::Debug + 'static {
     fn prepare(
         &self,
         settings: &serde_json::Value,
+        site: &Site,
     ) -> BoxFuture<Result<Box<dyn AdapterInstance>, AdapterError>>;
 }
 
@@ -465,7 +477,7 @@ pub trait AdapterInstance: Send + 'static {
 
 /// Adapts a typed [`Adapter`] into an [`AdapterFactory`]: deserialises the
 /// settings into `A::Config`, rejecting unknown keys by name, and calls
-/// [`Adapter::new`].
+/// [`Adapter::build`].
 pub struct TypedFactory<A> {
     descriptor: AdapterDescriptor,
     _adapter: PhantomData<fn() -> A>,
@@ -508,27 +520,48 @@ impl<A: Adapter> AdapterFactory for TypedFactory<A> {
     fn prepare(
         &self,
         settings: &serde_json::Value,
+        site: &Site,
     ) -> BoxFuture<Result<Box<dyn AdapterInstance>, AdapterError>> {
-        let result = typed_instance::<A>(settings);
+        let result = typed_instance::<A>(settings, site);
         Box::pin(std::future::ready(result))
     }
 }
 
 fn typed_instance<A: Adapter>(
     settings: &serde_json::Value,
+    site: &Site,
 ) -> Result<Box<dyn AdapterInstance>, AdapterError> {
+    if !settings.is_object() {
+        return Err(AdapterError::config(
+            "the instance settings must be a table of keys",
+        ));
+    }
     let mut unknown = Vec::new();
     let config: A::Config =
         serde_ignored::deserialize(settings.clone(), |path| unknown.push(path.to_string()))
-            .map_err(|e| AdapterError::config(e.to_string()))?;
+            .map_err(|e| {
+                // A config type with `deny_unknown_fields` fails before
+                // the ignored-key callback runs: still name the key.
+                let msg = e.to_string();
+                match unknown_field(&msg) {
+                    Some(key) => AdapterError::config_key(key, "unknown key"),
+                    None => AdapterError::config(msg),
+                }
+            })?;
     if let Some(first) = unknown.into_iter().next() {
         return Err(AdapterError::config_key(first, "unknown key"));
     }
-    let adapter = A::new(&config)?;
+    let adapter = A::build(&config, site)?;
     Ok(Box::new(TypedInstance::<A> {
         adapter,
         config: Arc::new(config),
     }))
+}
+
+/// The key in serde's standard "unknown field `x`, expected …" message.
+fn unknown_field(msg: &str) -> Option<&str> {
+    let rest = msg.strip_prefix("unknown field `")?;
+    rest.split_once('`').map(|(key, _)| key)
 }
 
 impl<A: Adapter> AdapterInstance for TypedInstance<A> {
@@ -575,12 +608,17 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-            .block_on(TypedFactory::<Dummy>::new().prepare(&v))
+            .block_on(
+                TypedFactory::<Dummy>::new()
+                    .prepare(&v, &Site::new("Europe/Berlin", "EUR").unwrap()),
+            )
     }
 
     #[test]
     fn typed_factory_rejects_unknown_keys_by_name() {
         assert!(prep(serde_json::json!({})).is_ok());
+        // Serde would build a struct from a sequence; settings are a table.
+        assert!(prep(serde_json::json!([])).is_err_and(|e| e.is_fatal()));
         match prep(serde_json::json!({"nn": 1})) {
             Err(AdapterError::Config { key, message }) => {
                 assert_eq!(key.as_deref(), Some("nn"));
@@ -593,6 +631,43 @@ mod tests {
             Err(AdapterError::Config { key: None, .. })
         ));
         assert!(prep(serde_json::json!({"n": 4})).is_err_and(|e| e.is_fatal()));
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Strict {
+        #[allow(dead_code)]
+        n: Option<u32>,
+    }
+
+    struct StrictDummy;
+
+    impl Adapter for StrictDummy {
+        type Config = Strict;
+        fn descriptor() -> AdapterDescriptor {
+            AdapterDescriptor::new("strict", "test", Capabilities::read_only())
+        }
+        fn new(_: &Strict) -> Result<Self, AdapterError> {
+            Ok(Self)
+        }
+        async fn run(self, _ctx: AdapterContext<Strict>) -> Result<(), AdapterError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn deny_unknown_fields_still_names_the_key() {
+        let site = Site::new("Europe/Berlin", "EUR").unwrap();
+        let r = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(
+                TypedFactory::<StrictDummy>::new().prepare(&serde_json::json!({"m": 1}), &site),
+            );
+        match r {
+            Err(AdapterError::Config { key, .. }) => assert_eq!(key.as_deref(), Some("m")),
+            _ => panic!("expected an unknown-key error"),
+        }
     }
 
     #[test]

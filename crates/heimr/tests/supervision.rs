@@ -167,7 +167,7 @@ async fn run_for(
 ) -> (Harness, heimr::Telemetry) {
     let dir = TempDir::new("run");
     let config = Config::from_toml_str(&format!(
-        "[heimr]\nstate_dir = \"{}\"\n[sinks]\nlogging = false\n[safety]\nmin_command_interval = \"0s\"\nmax_commands_per_hour = 100\n{toml}",
+        "[site]\ntime_zone = \"Europe/Berlin\"\ncurrency = \"EUR\"\n[heimr]\nstate_dir = \"{}\"\n[sinks]\nlogging = false\n[safety]\nmin_command_interval = \"0s\"\nmax_commands_per_hour = 100\n{toml}",
         dir.0.display()
     ))
     .unwrap();

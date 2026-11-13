@@ -4,8 +4,8 @@
 //! actuator) plus runs and restarts in the supervisor; see
 //! [`heimr_core::telemetry`].
 //
-// Export (OpenTelemetry, a `system` adapter publishing these stats as
-// readings): not yet implemented. Exporters should read
+// Export (OpenTelemetry, publishing these stats as readings): not yet
+// implemented; host and process metrics come from the `system` adapter. Exporters should read
 // `Telemetry::snapshot()` periodically rather than hook the hot path.
 
 use std::collections::BTreeMap;

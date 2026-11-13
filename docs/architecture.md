@@ -33,7 +33,7 @@ A local, fully code-defined home brain in Rust that:
 | Language | **Rust stable (2024 edition)**, tokio |
 | Home Assistant | Not used; heimr is a standalone system |
 | Bus | **MQTT** for sidecars and MQTT devices (planned); any standard broker |
-| Time-series store | **Under evaluation** (§4). Current implementation: PostgreSQL + TimescaleDB via `sqlx` |
+| Time-series store | **Under evaluation** (§4): an embedded engine, not part of this repository yet |
 | Archive and analysis | **Parquet**, partitioned by date and measurement, on local disk and object storage; readable by DuckDB, Polars and other engines |
 | Dashboards | **Custom Rust web app (Leptos, SSR + WASM)** for live and historical views; an off-the-shelf operations dashboard for service health |
 | Assistant | LLM-backed, through a minimal provider-neutral client (tool use, prompt caching, streaming) |
@@ -67,12 +67,7 @@ Sidecars are temporary bridges (often an existing Python or Node.js library) tha
 
 ## 4. Data model and retention
 
-**The storage engine is undecided.** A benchmark compares, on the same seeded synthetic dataset (two years of home, power and ops data, with late revisions):
-
-1. TimescaleDB (the current implementation) plus a nightly Parquet export;
-2. GreptimeDB;
-3. InfluxDB 3 Core;
-4. DataFusion + Delta Lake or Iceberg with a hot buffer.
+**The time-series store will be provided by an embedded engine and is not part of this repository yet.** Which engine is under evaluation: a benchmark compares candidates on the same seeded synthetic dataset (two years of home, power and ops data, with late revisions).
 
 Criteria: correctness (idempotent writes, late and revised data, DST), memory footprint on modest hardware, disk per year, query latency over two or more years, direct Parquet reads from DuckDB/Polars, OTLP ingestion, Grafana support, crash recovery, backup and restore to object storage, licence and maturity. The result will be published with its reasoning.
 
@@ -85,7 +80,7 @@ The logical model is the same whichever engine wins:
 - **Aggregates:** 5-minute, hourly and daily per metric; daily and monthly energy and cost per fuel. Aggregates keep `sum` and `n` so roll-ups are exact, and are refreshed explicitly after back-fills.
 - **Compression** on older data; raw data retained indefinitely (small: tens of MB per month for a typical home).
 - **Archive (planned):** nightly Parquet export of the previous day to local disk and object storage, schema-versioned, with a documented and tested restore and replay path.
-- **Units and time:** SI units, °C, p/kWh. All timestamps UTC (`jiff`); daily and monthly buckets currently follow UK local time (`Europe/London`, the zone of UK half-hourly settlement); a configurable zone is planned. Half-hourly price slots are aligned to UTC half-hours; DST transitions (46/48/50-slot days) are tested.
+- **Units and time:** SI units, °C; prices per kWh in the configured currency (`[site] currency`, major units). All timestamps UTC (`jiff`); daily and monthly buckets follow the configured site time zone (`[site] time_zone`, required, no default). Half-hourly price slots are aligned to UTC half-hours; DST transitions (23/24/25-hour days) are tested.
 
 Live views and stream analytics are to come from heimr's in-memory state and event streams (planned), not from the store.
 
@@ -95,10 +90,10 @@ Live views and stream analytics are to come from heimr's in-memory state and eve
 
 heimr runs on one or more always-on machines. The reference NixOS modules (planned) assume a single NixOS host running heimr and its supporting services; containers or several machines work as well.
 
-- **Components, by role:** heimr itself; a time-series store (PostgreSQL with TimescaleDB, which `heimr-store` targets today); an MQTT broker where sidecars or MQTT devices are used; optionally a telemetry collector and an operations dashboard. How machines are provisioned is up to each site.
+- **Components, by role:** heimr itself, with its time-series store embedded (§4); an MQTT broker where sidecars or MQTT devices are used; optionally a telemetry collector and an operations dashboard. How machines are provisioned is up to each site.
 - **Network:** keep the control path local; nothing listens on the internet; a segregated IoT network is recommended where devices allow it.
 - **Secrets:** an encrypted secret store. Never in the public repository, never in public CI.
-- **Backups:** regular database dumps and the Parquet archive, copied off the machine; restore drills are part of operating it.
+- **Backups:** regular snapshots of the store and the Parquet archive, copied off the machine; restore drills are part of operating it.
 
 ---
 
@@ -107,11 +102,12 @@ heimr runs on one or more always-on machines. The reference NixOS modules (plann
 **Public — `heimr`:** all logic. Builds, tests and runs with example configuration only.
 ```
 crates/heimr-core/      domain types, traits, adapter API, safety rules
-crates/heimr-store/     schema, migrations, idempotent writes
 crates/heimr/           the app as a library + default binary; heimr.example.toml
+crates/heimr-testkit/   adapter conformance suite, harness, record/replay with redaction
 crates/<integration>/   generic protocols and public services
+templates/adapter/      a copyable adapter crate wired to the test kit
 ```
-Upcoming: a test kit (conformance suite, record/replay, redaction), an adapter template, analytics, the assistant and reusable NixOS modules.
+Upcoming: the store (§4), analytics, the assistant and reusable NixOS modules.
 
 **Private — your own site repository:** values, infrastructure and any adapters you do not want to publish. A suggested layout:
 ```
@@ -201,18 +197,18 @@ Planned; none of this is built yet.
 
 ## 10. Verification strategy
 
-In place today: `insta` contract snapshots and `proptest` in the API clients and the core, Docker-backed store tests, the safety-layer property tests, and the static checks below. Rows and items marked *planned* are not in the tree yet.
+In place today: `insta` contract snapshots and `proptest` in the API clients and the core, the safety-layer property tests, and the static checks below. Rows and items marked *planned* are not in the tree yet.
 
 | Layer | Method |
 |---|---|
 | Crypto | *Planned, with the first protocol crates:* audited crates only (RustCrypto, `snow`, `rustls`); RFC test vectors (SRP RFC 5054, HKDF RFC 5869, ChaCha20-Poly1305 RFC 8439, Noise vectors) |
 | Protocols | *Planned:* specification-example unit tests (e.g. HAP TLV8 and HAP-HTTP, protobuf frames) |
 | Differential | *Planned:* existing open-source implementations of a protocol run on the same inputs as the Rust code; tests assert equivalence |
-| Record/replay | *Planned:* device traffic captured into fixtures with identifiers removed; native adapters must replay identically |
+| Record/replay | `heimr-testkit` replays HTTP cassettes on a local server; recordings are saved only after identifiers are removed and a scan finds nothing identifying. Replay of other device transports is planned |
 | API contracts | Service responses snapshot-tested (`insta`) against hand-built fixtures; a scheduled live-contract job to flag schema drift is planned |
 | Property and fuzz | `proptest` (parsers, DST slot alignment, the safety layer never exceeding its limits; cost maths and planner clamps as they land); `cargo-fuzz` on parsers is planned |
-| Data integrity | Idempotent upserts and DST-correct buckets are tested; no gaps or duplicates on reconnect, spool replay and reconciliation against supplier totals are planned |
-| Adapter contract | *Planned:* `heimr-testkit` conformance: monotonic timestamps, valid units, no duplicates across reconnect, no command without capability, nothing delivered in shadow mode, clean shutdown |
+| Data integrity | DST-correct half-hourly price slots are tested; idempotent writes, DST-correct buckets, no gaps or duplicates on reconnect, spool replay and reconciliation against supplier totals are planned |
+| Adapter contract | `heimr-testkit` conformance, a named scenario list run in the real app on a fake clock: configuration handling, records (valid identifiers and units, timestamps strictly increasing per series, also across the reconnect or supervisor restart after an injected outage; restarts of the whole app are not covered), stats, shutdown at arbitrary points, nothing delivered or written in shadow mode (writes only where the fake upstream counts them), live delivery with an audit record, no I/O while building an instance, outages, rejected credentials and garbage upstream input |
 | Static | `clippy -D warnings`, `cargo-deny`, `#![forbid(unsafe_code)]`; `cargo-semver-checks` on published crates is planned |
 | Shadow run | *Planned:* a native adapter is run in shadow alongside an existing integration and compared before it takes over |
 
@@ -245,4 +241,4 @@ In order, each stage ending with its tests and checks green:
 
 ## 13. Conventions
 
-Rust stable, 2024 edition; tokio; `thiserror` in libraries, `anyhow` in binaries; `tracing`; `jiff`; `sqlx` with compile-time checked queries. `#![forbid(unsafe_code)]` in every crate. Small changes with tests; CI green. Concise docs, British English. Details: [`CONTRIBUTING.md`](../CONTRIBUTING.md).
+Rust stable, 2024 edition; tokio; `thiserror` in libraries, `anyhow` in binaries; `tracing`; `jiff`. `#![forbid(unsafe_code)]` in every crate. Small changes with tests; CI green. Concise docs, British English. Details: [`CONTRIBUTING.md`](../CONTRIBUTING.md).

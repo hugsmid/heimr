@@ -19,7 +19,7 @@ cargo add serde --features derive
 cargo add tokio --features macros,time
 ```
 
-Add `#![forbid(unsafe_code)]`, a README, docs and an example, and a `tests/fixtures/` directory with a `README.md` saying how each fixture was made.
+Add `#![forbid(unsafe_code)]`, a README, docs and an example, and a `tests/fixtures/` directory with a `README.md` saying how each fixture was made. Or start from a copy of [`templates/adapter`](../templates/adapter), which has all of that and a conformance test.
 
 ## 2. Kinds, instances and the trait
 
@@ -40,6 +40,15 @@ pub trait Adapter: Sized + Send + 'static {
 
     /// Build the adapter from its config. Validate here; do no I/O.
     fn new(config: &Self::Config) -> Result<Self, AdapterError>;
+
+    /// Build the adapter for a site (its time zone and currency). The app
+    /// calls this, not [`Adapter::new`]; the default ignores the site and
+    /// calls `new`. Override it only to validate against or keep the site
+    /// at build time; at run time it is [`AdapterContext::site`].
+    fn build(config: &Self::Config, site: &Site) -> Result<Self, AdapterError> {
+        let _ = site;
+        Self::new(config)
+    }
 
     /// What this instance can do, if it depends on its config (e.g. the
     /// levels of the configured device model). Must not exceed the
@@ -84,7 +93,9 @@ impl Adapter for Demo {
 
 A sensor declares `Capabilities::read_only()`. An instance with no write capability never gets a command channel, whatever its configuration says, and `mode = "live"` on it is a configuration error. An air-treatment adapter that accepts `CommandKind::FanMode` must also declare its fan levels (`with_fan_levels(1, 5)`) or named presets (`with_fan_presets(["night"])`); the core refuses others. If an instance can do less than its kind (say, the configured model has fewer levels), override `Adapter::capabilities`.
 
-**Configuration** is a plain `serde` type for the adapter's own keys. The app handles `type`, `enabled`, `mode` and `safety` (so adapters cannot use those names) and rejects unknown keys by name, inside your config type too:
+**Configuration** is a plain `serde` type for the adapter's own keys. The app handles `type`, `enabled`, `mode` and `safety` (so adapters cannot use those names) and rejects unknown keys by name, inside your config type too.
+
+The site's time zone and currency are set once, in the required `[site]` section, and the core is their only source: **never declare a time-zone or currency key of your own**. They reach the adapter through `Adapter::build` (at prepare time) and `ctx.site()` (at run time). A standalone client library that takes a zone as an argument gets `ctx.site().time_zone()`. The demo's config:
 
 <!-- quote: crates/heimr/src/demo.rs#config -->
 ```rust
@@ -186,6 +197,7 @@ An instance's whole life is one async function. It returns `Ok(())` when shutdow
 | `ctx.now()`, `ctx.sleep_until(..)`, `ctx.sleep(..)` | All time comes from the context clock (wall time for timestamps, monotonic for `sleep`), so tests can use a fake one |
 | `ctx.shutdown()` | Finish in-flight work and return promptly |
 | `ctx.state_dir()` | Private, persistent directory for pairing keys, cursors or caches |
+| `ctx.site()` | The site's time zone and currency, from the required `[site]` section. Records stay UTC; use the zone only to find local days (`site.day_bounds(date)`, `site.local_date(t)`) and the currency for prices (in its major unit). Never hard-code either |
 | `ctx.health()`, `ctx.metrics()` | Telemetry (section 5); the adapter can report health and metrics but not change its run state |
 
 Adapters never see the bus, the store or other adapters. State records are keyed by (instance, zone or device id), so an instance cannot overwrite another's state whatever ids it uses.
@@ -363,9 +375,35 @@ Two things are up to the adapter, each one line:
 - **Health**: `ctx.health().ok().await?`, `ctx.health().degraded("…").await?` or `ctx.health().failed("…").await?`. Changes are recorded in the stats and emitted as an `adapter_health` event; repeating the same status and reason does nothing, so call it freely.
 - **Custom metrics**: `ctx.metrics().counter("ticks", 1)` and `ctx.metrics().gauge("queue_depth", 4.0)`, kept in the same stats (names follow the id rules: ASCII letters, digits, `.` `_` `:` `-`).
 
-## 6. Testing
+## 6. Testing your adapter
 
-Unit-test configuration and parsing directly, and run the adapter end to end inside the app on a fake clock with an in-memory sink. The demo's tests in [`crates/heimr/tests/demo.rs`](../crates/heimr/tests/demo.rs) do this in both modes, starting the app like this under `#[tokio::test(start_paused = true)]`:
+Add `heimr-testkit` as a dev-dependency. Its conformance suite runs your adapter inside the real app, on a fake clock, through a fixed list of named scenarios derived from this contract: configuration handling (unknown, reserved and malformed keys, your own invalid cases, no I/O while building an instance), staying up, emitting, reporting health, record well-formedness (identifiers, finite values, documented units, timestamps that never repeat or go back per series, also across the reconnect or restart after an outage), stats, shutdown within a deadline at arbitrary points, shadow and live command handling through the actuator (commands audited, none delivered in shadow mode, no device writes in shadow mode or without a command), and behaviour when the upstream is unavailable, rejects credentials or returns garbage (no fatal exit on an outage, no hot retry loop, fatal on rejection, no panic). The test file of the template in [`templates/adapter`](../templates/adapter) is the whole suite against a replay of a recorded (here hand-built) sensor:
+
+<!-- quote: templates/adapter/tests/conformance.rs#conformance -->
+```rust
+#[test]
+fn conformance() {
+    let cassette = Cassette::parse(include_str!("fixtures/sensor.json")).expect("a cassette");
+    Suite::replay::<ExampleSensor>(
+        cassette,
+        |uri| json!({ "url": format!("{uri}/status"), "interval": "10s" }),
+    )
+    .invalid("url", json!({ "url": "not a url" }))
+    .invalid("interval", json!({ "interval": "1s" }))
+    .expect_skip("commands.shadow", "read-only sensor: no commands")
+    .expect_skip("commands.live", "read-only sensor: no commands")
+    .run()
+    .assert_passed();
+}
+```
+
+Each scenario reports pass, pass with a note, fail with the reason, or skip. A read-only adapter skips the command scenarios; an upstream that cannot simulate faults skips the fault scenarios; one that does not count traffic skips the write and I/O checks, or passes the scenario with a note naming what was not observed. `assert_passed` accepts none of these silently: declare each skip, note or accepted failure by scenario id with a reason (`.expect_skip(id, why)`, `.expect_note(id, why)`, `.expect_failure(id, why)`), as the template does for its command scenarios. The suite fails on anything undeclared, on a declaration for an unknown id, and on a declaration that does not happen (a declared skip that passes, a declared failure that passes or is skipped), so declarations cannot go stale; the failure message lists each offending id with its reason. `HEIMR_TESTKIT_ONLY=<id>[,<id>…]` runs only those scenarios; the rest are reported as filtered and their declarations are not checked, and an unknown id fails the run. Adapters whose data is synthetic use `Suite::new::<A>(settings)`; adapters with another kind of upstream (a socket, a file tree) implement the small `Upstream` trait to report traffic and simulate faults.
+
+The kit cannot check every rule generically. Test these yourself: holds mapped to the device's native timed or next-block override; that a delivered command has the intended effect on the device; no duplicate readings across restarts of the whole app (restarts and reconnects within a run are checked); and units of metrics the kit does not know. That the audit record is durable before your adapter receives a command is the core's guarantee, not something your adapter or the kit has to prove.
+
+For unit-level behaviour, `heimr_testkit::Harness` runs the adapter with a real context on a manual clock and keeps every record in memory; `heimr_testkit::render` turns records into stable text for snapshot tests, and `heimr_testkit::replay` serves recorded HTTP exchanges. Record through `Cassette::save` with a `Redactor`: it replaces what you name with placeholders, replaces credentials in headers and query strings, and scans what remains: the request path, query parameter names and values, response header names and values, JSON keys and values at any depth, and text bodies. It refuses to write while anything still looks identifying: runs of ten or more digits (epoch times under time-like keys excepted), UUIDs, MAC and e-mail addresses, tokens, IP addresses (loopback and documentation ranges excepted), host names under host-like keys, unredacted credentials, values under id-like, serial, address and name keys, and precise coordinates. The scan is a backstop, not a guarantee: it only knows common shapes of identifying data, so read what you record. Resolve a finding by redacting the value or, if you have checked it identifies nothing, by allowing that location or key explicitly (`Redactor::allow`, `Redactor::allow_key`).
+
+The app-level tests of the demo, in [`crates/heimr/tests/demo.rs`](../crates/heimr/tests/demo.rs), show how to go further by hand (driving time, submitting commands, reading the journal):
 
 <!-- quote: crates/heimr/tests/demo.rs#app-under-test -->
 ```rust
@@ -383,8 +421,6 @@ let telemetry = app.telemetry();
 let stop = app.shutdown_trigger();
 let running = tokio::spawn(app.run_until(std::future::pending()));
 ```
-
-Drive time with tokio's paused clock, submit commands through the submitter, then assert on the sink's contents, the audit journal in the state directory and `telemetry`. `App::builder(..).audit_log(..)` takes a `MemoryAuditLog` instead of the journal. [`crates/heimr/tests/supervision.rs`](../crates/heimr/tests/supervision.rs) shows how to test restart behaviour.
 
 Rules for fixtures:
 
@@ -415,6 +451,7 @@ You can propose a private adapter for inclusion later; see [`CONTRIBUTING.md`](.
 - [ ] All time from the context clock; shutdown honoured promptly.
 - [ ] Transient and fatal errors distinguished; no duplicates across reconnect; health reported.
 - [ ] `match`es on core types have wildcard arms.
+- [ ] The `heimr-testkit` conformance suite passes (expected failures declared with a reason).
 - [ ] Tests over redacted or hand-built fixtures, in shadow and live mode.
 - [ ] Fixtures directory has a `README.md` saying how each fixture was made.
 - [ ] README, docs and an example; `#![forbid(unsafe_code)]`.
