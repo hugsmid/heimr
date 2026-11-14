@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use heimr_core::{Envelope, Event, Reading, Record, StateKey};
+use heimr_core::{Envelope, Event, Forecast, Reading, Record, StateKey};
 
 /// A destination for records.
 ///
@@ -54,6 +54,17 @@ impl MemorySink {
             .iter()
             .filter_map(|e| match &e.record {
                 Record::Reading(r) => Some(r.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Forecasts held, oldest first.
+    pub fn forecasts(&self) -> Vec<Forecast> {
+        self.lock()
+            .iter()
+            .filter_map(|e| match &e.record {
+                Record::Forecast(f) => Some(f.clone()),
                 _ => None,
             })
             .collect()
@@ -111,8 +122,8 @@ impl Sink for MemorySink {
     }
 }
 
-/// Logs records through `tracing`: readings and state at `debug`, events at
-/// `info`.
+/// Logs records through `tracing`: readings, forecasts and state at
+/// `debug`, events at `info`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LoggingSink;
 
@@ -132,6 +143,17 @@ impl Sink for LoggingSink {
                 unit = %r.unit,
                 time = %r.time,
                 "reading"
+            ),
+            Record::Forecast(f) => tracing::debug!(
+                source,
+                device = %f.device,
+                metric = %f.metric,
+                value = f.value,
+                unit = %f.unit,
+                valid_from = %f.valid_from,
+                valid_to = %f.valid_to,
+                issued_at = %f.issued_at,
+                "forecast"
             ),
             Record::Event(e) => tracing::info!(
                 source,

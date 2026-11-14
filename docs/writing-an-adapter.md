@@ -57,6 +57,15 @@ pub trait Adapter: Sized + Send + 'static {
         Self::descriptor().capabilities
     }
 
+    /// This instance's series templates, if they depend on its config:
+    /// the kind's, with the intervals the configuration sets (a poll
+    /// interval becomes `expected_interval`, and so the staleness limit).
+    /// Only the intervals may differ from the kind's, and an instance may
+    /// leave out metrics it never emits. Defaults to the descriptor's.
+    fn series(&self) -> Vec<SeriesTemplate> {
+        Self::descriptor().series
+    }
+
     /// Run until [`AdapterContext::shutdown`] fires, then return `Ok(())`
     /// promptly. Handle routine failures (reconnects) inside. Returning
     /// `Err`, panicking, or returning `Ok(())` before shutdown marks the
@@ -88,8 +97,24 @@ impl Adapter for Demo {
                 CommandKind::ClimateOff,
             ]),
         )
+        // Sampled every `interval` (the default's here), stamped by the
+        // host clock.
+        .with_series(SeriesTemplate::gauge(
+            Metric::TEMPERATURE,
+            Unit::Celsius,
+            default_interval(),
+        ))
+        .with_series(SeriesTemplate::gauge(
+            Metric::HUMIDITY,
+            Unit::Percent,
+            default_interval(),
+        ))
     }
 ```
+
+**Series templates.** Declare one `SeriesTemplate` per metric your kind emits as readings, and one per metric it emits as forecasts. A template says what the series holds (`SeriesKind::Gauge`, `Counter { wrap_at }`, `State` or `Text`), its unit, how often a value is expected (`expected_interval`), where `t` comes from (`TimeSource::Host` when you stamp it with the clock, `TimeSource::Device` when the source does), whether the source revises published values (`versioned()`), and whether it sends only changes (`record_on_change()`; `expected_interval` is then the keep-alive interval, not a poll interval). `with_staleness_limit` (default 3 × the interval) and `with_lateness_bound` (default 5 minutes) are optional. The core refuses a reading or forecast whose metric has no template, or whose unit differs from it. A template is fixed for the life of its series: a change of kind, value type, unit or versioning is a new series under a new metric name, never an edit. Where your configuration sets the poll interval, the descriptor's template states the default configuration's, and `Adapter::series` returns the instance's: the same templates with `with_expected_interval(configured)`, as the template crate does. Only the intervals may differ from the kind's; the app refuses anything else. A template's role says what the series is about: `SeriesRole::Measured` for readings (the default), `SeriesRole::Forecast` for modelled forecasts (`SeriesTemplate::forecast`: weather; always versioned, keyed by valid time) and `SeriesRole::Scheduled` for published values known in advance (`SeriesTemplate::scheduled`: tariff rates). The core refuses a `Basis::Modelled` forecast whose template is not a forecast template, and a `Basis::Published` one whose template is not scheduled. An optional retention class (`with_retention(Retention::Diagnostic)` for diagnostics such as host metrics; `LongTerm` by default) tells the store how long to keep the detail. Roles, retention classes and interval series are *provisional*, and forecast and scheduled series are not written anywhere yet.
+
+**Provisional** means: shaped for the store heimr will write to, but not final. A provisional part may change when the store is added, and any change will be listed in the changelog. Use it as documented; everything not marked provisional is the contract as it stands.
 
 A sensor declares `Capabilities::read_only()`. An instance with no write capability never gets a command channel, whatever its configuration says, and `mode = "live"` on it is a configuration error. An air-treatment adapter that accepts `CommandKind::FanMode` must also declare its fan levels (`with_fan_levels(1, 5)`) or named presets (`with_fan_presets(["night"])`); the core refuses others. If an instance can do less than its kind (say, the configured model has fewer levels), override `Adapter::capabilities`.
 
@@ -165,6 +190,7 @@ fn new(config: &DemoConfig) -> Result<Self, AdapterError> {
     Ok(Self {
         zones,
         rng: XorShift::new(config.seed),
+        interval: config.interval,
     })
 }
 ```
@@ -192,11 +218,12 @@ An instance's whole life is one async function. It returns `Ok(())` when shutdow
 | Method | Use |
 |---|---|
 | `ctx.config()` | The typed config, already parsed and validated |
-| `ctx.reading(..)`, `ctx.event(..)`, `ctx.emit(..)`, `ctx.emitter()` | Build and send readings, state and events. `reading` and `event` stamp the instance name; the core refuses records that name another source or actor, and events of a reserved kind (`command`, `command_*`, `adapter_*`, `heimr*`). `emit` waits when the app is behind (back-pressure) |
+| `ctx.reading(..)`, `ctx.forecast(..)`, `ctx.event(..)`, `ctx.emit(..)`, `ctx.emitter()` | Build and send readings, forecasts, state and events. `reading` and `event` stamp the instance name; the core refuses records that name another source or actor, and events of a reserved kind (`command`, `command_*`, `adapter_*`, `heimr*`). `emit` waits when the app is behind (back-pressure) |
+| `ctx.forecast_horizon()` | How far past its issue time a forecast may reach (`[heimr] forecast_horizon`, 16 days by default); drop anything beyond it |
 | `ctx.take_commands()` | The command handle. Yields only for a write-capable instance configured `live` |
 | `ctx.now()`, `ctx.sleep_until(..)`, `ctx.sleep(..)` | All time comes from the context clock (wall time for timestamps, monotonic for `sleep`), so tests can use a fake one |
 | `ctx.shutdown()` | Finish in-flight work and return promptly |
-| `ctx.state_dir()` | Private, persistent directory for pairing keys, cursors or caches |
+| `ctx.state_dir()` | Private, persistent directory for pairing keys, revision maps or caches |
 | `ctx.site()` | The site's time zone and currency, from the required `[site]` section. Records stay UTC; use the zone only to find local days (`site.day_bounds(date)`, `site.local_date(t)`) and the currency for prices (in its major unit). Never hard-code either |
 | `ctx.health()`, `ctx.metrics()` | Telemetry (section 5); the adapter can report health and metrics but not change its run state |
 
@@ -207,7 +234,7 @@ A minimal read-only adapter polls, emits and honours shutdown. This is the examp
 <!-- quote: crates/heimr-core/src/adapter.rs#thermometer -->
 ```rust
 use heimr_core::{Adapter, AdapterContext, AdapterDescriptor, AdapterError, Capabilities};
-use heimr_core::{DeviceId, Metric, Unit};
+use heimr_core::{DeviceId, Metric, SeriesTemplate, Unit};
 use jiff::SignedDuration;
 
 #[derive(Debug, serde::Deserialize)]
@@ -220,6 +247,8 @@ impl Adapter for Thermometer {
 
     fn descriptor() -> AdapterDescriptor {
         AdapterDescriptor::new("thermometer", "Reads one temperature sensor", Capabilities::read_only())
+            // One series per metric: what it holds, its unit, how often it comes.
+            .with_series(SeriesTemplate::gauge(Metric::TEMPERATURE, Unit::Celsius, SignedDuration::from_secs(10)))
     }
 
     fn new(config: &Config) -> Result<Self, AdapterError> {
@@ -329,13 +358,33 @@ async fn apply(
 
 Every command that overrides a device (a setpoint, heating off, a fan mode) carries a `Hold`: `Hold::NextScheduleChange`, or `Hold::For(duration)` bounded by the policy's `max_hold` (2 hours by default, never more than 24). **Map it to the device's native timed or "until the next schedule block" override, so the device reverts on its own if heimr stops. Never implement an open-ended override with a timer of your own.** If a device supports only one of the two, use the one that ends sooner. `ClimateCommand::ResumeSchedule`, the safe direction, has no hold and is never refused by a rate limit.
 
+### Readings, forecasts and money
+
+- A **reading** is a value at an instant. An amount over a fixed interval, such as consumption per half-hour or rainfall per hour, is still a reading, stamped at the **start** of the interval, in an interval series (`SeriesTemplate::interval(metric, unit, length, expected_interval)`, kind `SeriesKind::Interval`, *provisional*): `t` must be aligned to the length (a multiple of it since the Unix epoch, in UTC), and the value is the amount for `[t, t + length)`. A mean over an interval is not an amount: keep it a gauge. Intervals of varying length (local days, months) are not covered yet; leave those as gauges or scheduled values (a daily standing charge stays a scheduled gauge).
+- **Versioned series.** A source that re-issues past values (a corrected price, consumption that settles later, every forecast) declares the series `versioned()` (forecast templates always are), and each reading or forecast carries `changed_at` (`with_changed_at`): the source's revision time or version, higher for each revision. It must be the same every time one revision is re-sent, so it is **never the time of the current fetch**. The core refuses a record of a versioned series without one, and a `changed_at` on any other series.
+- **Non-finite values** (NaN, ±∞) are data, not errors: do not filter them out. The core passes them through unchanged and the store will record them as bad quality; `records.well_formed` notes them, so declare the note if your source produces them.
+- A **forecast** (`Forecast`, built with `ctx.forecast(device, metric, value, unit, basis)`) is a value for a period `valid_from..valid_to` (end exclusive; equal for an instant), issued at `issued_at`. Its basis is `Basis::Published` for a value the source has committed to (a tariff rate) or `Basis::Modelled` for a prediction (weather). `issued_at` is when the source issued it, or when your adapter first saw it; the time-window rule for records applies to `issued_at`, not to the period. The core refuses a forecast whose period ends before it starts, or that ends further than the forecast horizon after its issue time.
+- **Money** is in the site currency's **major unit**: `Unit::CurrencyPerKilowattHour` (`¤/kWh`) for prices, `Unit::Currency` (`¤`) for amounts such as a daily standing charge; 0.184, not 18.4 cents. The kit documents `unit_rate` in `¤/kWh` and `standing_charge` in `¤`, so money emitted as a plain number fails `records.units`. The currency a vendor quotes is a property of your kind, not configuration: declare it on the descriptor with `with_source_currency` (bind the code to a `const`, e.g. `const USD: Currency = Currency::of("USD");`). The app refuses an instance of your kind unless `[site].currency` matches, naming both currencies; heimr never converts. The core refuses money from a kind that declares no currency. A kind that emits no money declares none and must run for a site in any currency: never check the site's currency yourself. The kit's default test site quotes EUR, so a kind declaring another currency must run the kit with a site in that currency (`Suite::site`), or every scenario fails with the mismatch.
+
 ### Guidelines
 
 - Prefer push (subscriptions, observe, event streams) over polling; when polling, respect the service's rate limits and make the interval configurable.
-- Reconnect with backoff; never emit duplicates across a reconnect.
+- Reconnect with backoff. On every start, and after an error, re-send what you may have lost (see below); never try to suppress repeats with a cursor.
 - Use the context clock for every timestamp and sleep.
 - Clone `ctx.emitter()` into sub-tasks rather than passing the context around.
 - No secrets in logs; credentials come from configuration, which a site fills from its secret store.
+
+### How heimr talks to the store
+
+heimr will write what you emit to a time-series store, which is not part of heimr yet. It will be built so that sending something twice is free and losing something is not. These are the rules adapters follow today, so that their records are ready for it; the core and the test kit already enforce them:
+
+- **Stable `t`.** A reading's time comes from the source (a device clock, a slot or hour in an API answer) or is taken once, when you sample. Never re-stamp a value when you send it again; for a forecast, keep its `issued_at` too.
+- **Identical repeats.** The store will drop a repeat of the same series, `t`, value (bit for bit: `0.0` and `-0.0` differ), quality and `changed_at`. So a repeat must be identical in all of them, and a quality must not change between sends.
+- **Re-send on start.** On every start, and after an error or an emit whose outcome you do not know, re-send the last few minutes, or for a polled source its whole last fetch window. `emit` returning `Ok` means the hub has the record, not that it is safely stored, so this is how anything lost in a crash will come back. Do not keep a cursor to avoid repeats; between starts, send only what is new or changed.
+- **Versioned series and `changed_at`.** A source that revises published values declares the series `versioned()` and sends a `changed_at` with each record: the highest will be current, and an older one re-sent will never overwrite a newer correction. Use the source's revision time or version if it has one. If not, keep your own per key in `ctx.state_dir()`, written durably before you send: for each (series, `t`) only the last value and its `changed_at`; reuse it while the value is unchanged, and mint `max(now, stored + 1)` in nanoseconds when it changes, so a backward clock step cannot lower it. `heimr_core::Revisions` does exactly this. Never use the time of the current fetch. If the saved map is lost, start a new one and report health `degraded`: values seen again look newer, but nothing is reverted. If saving fails, send nothing you minted and retry. After the wall clock steps back, the marker of a changed value is still `stored + 1`, so it can run ahead of the clock (and of a forecast's `issued_at`); a forecast first seen at a time now in the future cannot be sent (its `issued_at` would be refused), so hold it back until the clock passes it again.
+- **Back-pressure is a wait.** `emit` waits while the hub (and later the store) is behind. That is neither a refusal nor a failure: do not retry around it or drop records.
+
+Over an interval series (*provisional*), heimr relies on window sums only, never on averages or integrals (the store will refuse them). A record-on-change source (one that sends only changes; never an interval series) also re-sends an unchanged value at least once per `expected_interval` of its template, as a keep-alive, or the series will read as stale. The test kit checks all of this: `records.monotonic` judges repeats run by run, and `records.keep_alive` the keep-alives.
 
 ## 4. Shadow mode, live mode and the safety layer
 
@@ -377,7 +426,7 @@ Two things are up to the adapter, each one line:
 
 ## 6. Testing your adapter
 
-Add `heimr-testkit` as a dev-dependency. Its conformance suite runs your adapter inside the real app, on a fake clock, through a fixed list of named scenarios derived from this contract: configuration handling (unknown, reserved and malformed keys, your own invalid cases, no I/O while building an instance), staying up, emitting, reporting health, record well-formedness (identifiers, finite values, documented units, timestamps that never repeat or go back per series, also across the reconnect or restart after an outage), stats, shutdown within a deadline at arbitrary points, shadow and live command handling through the actuator (commands audited, none delivered in shadow mode, no device writes in shadow mode or without a command), and behaviour when the upstream is unavailable, rejects credentials or returns garbage (no fatal exit on an outage, no hot retry loop, fatal on rejection, no panic). The test file of the template in [`templates/adapter`](../templates/adapter) is the whole suite against a replay of a recorded (here hand-built) sensor:
+Add `heimr-testkit` as a dev-dependency. Its conformance suite runs your adapter inside the real app, on a fake clock, through a fixed list of named scenarios derived from this contract: configuration handling (unknown, reserved and malformed keys, your own invalid cases, no I/O while building an instance), staying up, emitting, reporting health, record well-formedness (identifiers, documented units, non-finite values noted, money only from a kind with a source currency, forecast periods within the horizon, series templates and `changed_at` as declared, identical repeats and outranking corrections run by run across the reconnect or restart after an outage, keep-alives for record-on-change series), the site currency (a declared source currency must match the site's; a kind without one runs anywhere), stats, shutdown within a deadline at arbitrary points, shadow and live command handling through the actuator (commands audited, none delivered in shadow mode, no device writes in shadow mode or without a command), and behaviour when the upstream is unavailable, rejects credentials or returns garbage (no fatal exit on an outage, no hot retry loop, fatal on rejection, no panic). The test file of the template in [`templates/adapter`](../templates/adapter) is the whole suite against a replay of a recorded (here hand-built) sensor:
 
 <!-- quote: templates/adapter/tests/conformance.rs#conformance -->
 ```rust
@@ -392,6 +441,7 @@ fn conformance() {
     .invalid("interval", json!({ "interval": "1s" }))
     .expect_skip("commands.shadow", "read-only sensor: no commands")
     .expect_skip("commands.live", "read-only sensor: no commands")
+    .expect_note("records.keep_alive", "polled: no record-on-change series")
     .run()
     .assert_passed();
 }
@@ -399,9 +449,9 @@ fn conformance() {
 
 Each scenario reports pass, pass with a note, fail with the reason, or skip. A read-only adapter skips the command scenarios; an upstream that cannot simulate faults skips the fault scenarios; one that does not count traffic skips the write and I/O checks, or passes the scenario with a note naming what was not observed. `assert_passed` accepts none of these silently: declare each skip, note or accepted failure by scenario id with a reason (`.expect_skip(id, why)`, `.expect_note(id, why)`, `.expect_failure(id, why)`), as the template does for its command scenarios. The suite fails on anything undeclared, on a declaration for an unknown id, and on a declaration that does not happen (a declared skip that passes, a declared failure that passes or is skipped), so declarations cannot go stale; the failure message lists each offending id with its reason. `HEIMR_TESTKIT_ONLY=<id>[,<id>…]` runs only those scenarios; the rest are reported as filtered and their declarations are not checked, and an unknown id fails the run. Adapters whose data is synthetic use `Suite::new::<A>(settings)`; adapters with another kind of upstream (a socket, a file tree) implement the small `Upstream` trait to report traffic and simulate faults.
 
-The kit cannot check every rule generically. Test these yourself: holds mapped to the device's native timed or next-block override; that a delivered command has the intended effect on the device; no duplicate readings across restarts of the whole app (restarts and reconnects within a run are checked); and units of metrics the kit does not know. That the audit record is durable before your adapter receives a command is the core's guarantee, not something your adapter or the kit has to prove.
+The kit cannot check every rule generically. Test these yourself: holds mapped to the device's native timed or next-block override; that a delivered command has the intended effect on the device; that a restart of the whole app re-sends your last window identically (restarts and reconnects within a run are checked; `Harness::restart` restarts an instance on the same state directory, and `checks::monotonic(&h.runs(), &series)` judges what it re-sent). That the audit record is durable before your adapter receives a command is the core's guarantee, not something your adapter or the kit has to prove.
 
-For unit-level behaviour, `heimr_testkit::Harness` runs the adapter with a real context on a manual clock and keeps every record in memory; `heimr_testkit::render` turns records into stable text for snapshot tests, and `heimr_testkit::replay` serves recorded HTTP exchanges. Record through `Cassette::save` with a `Redactor`: it replaces what you name with placeholders, replaces credentials in headers and query strings, and scans what remains: the request path, query parameter names and values, response header names and values, JSON keys and values at any depth, and text bodies. It refuses to write while anything still looks identifying: runs of ten or more digits (epoch times under time-like keys excepted), UUIDs, MAC and e-mail addresses, tokens, IP addresses (loopback and documentation ranges excepted), host names under host-like keys, unredacted credentials, values under id-like, serial, address and name keys, and precise coordinates. The scan is a backstop, not a guarantee: it only knows common shapes of identifying data, so read what you record. Resolve a finding by redacting the value or, if you have checked it identifies nothing, by allowing that location or key explicitly (`Redactor::allow`, `Redactor::allow_key`).
+For unit-level behaviour, `heimr_testkit::Harness` runs the adapter with a real context on a manual clock and keeps every record in memory; `heimr_testkit::render` turns records into stable text for snapshot tests, and `heimr_testkit::replay` serves recorded HTTP exchanges. Record through `Cassette::save` with a `Redactor`: it replaces what you name with placeholders, replaces credentials in headers and query strings, and scans what remains: the request path, query parameter names and values, response header names and values, JSON keys and values at any depth, and text bodies. It refuses to write while anything still looks identifying: runs of ten or more digits (epoch times under time-like keys, and dotted version strings under version keys, excepted), UUIDs, MAC and e-mail addresses, tokens, IP addresses (loopback and documentation ranges excepted), host names under host-like keys, unredacted credentials, values under id-like, serial, address and name keys, and precise coordinates. The scan is a backstop, not a guarantee: it only knows common shapes of identifying data, so read what you record. Resolve a finding by redacting the value or, if you have checked it identifies nothing, by allowing that location or key explicitly (`Redactor::allow`, `Redactor::allow_key`).
 
 The app-level tests of the demo, in [`crates/heimr/tests/demo.rs`](../crates/heimr/tests/demo.rs), show how to go further by hand (driving time, submitting commands, reading the journal):
 
@@ -449,7 +499,9 @@ You can propose a private adapter for inclusion later; see [`CONTRIBUTING.md`](.
 - [ ] `new` validates the config, names bad keys and does no I/O.
 - [ ] Holds map to the device's native timed or next-block override; no open-ended overrides.
 - [ ] All time from the context clock; shutdown honoured promptly.
-- [ ] Transient and fatal errors distinguished; no duplicates across reconnect; health reported.
+- [ ] Transient and fatal errors distinguished; the last window re-sent identically on start and after an error; health reported.
+- [ ] One series template per metric emitted (readings, forecasts); `changed_at` on versioned series, stable across re-sends.
+- [ ] Money in the site currency's major unit, with the kind's `source_currency` declared; no currency key in the config.
 - [ ] `match`es on core types have wildcard arms.
 - [ ] The `heimr-testkit` conformance suite passes (expected failures declared with a reason).
 - [ ] Tests over redacted or hand-built fixtures, in shadow and live mode.

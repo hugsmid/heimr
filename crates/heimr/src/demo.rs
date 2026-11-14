@@ -15,6 +15,9 @@
 //! after a command for a zone it does not simulate) and counts `ticks` as a
 //! custom metric.
 //!
+//! Series: `temperature` (°C) and `humidity` (%) per zone, gauges stamped
+//! by the host clock, expected every `interval`.
+//!
 //! <!-- ANCHOR: toml -->
 //! ```toml
 //! [adapters.demo]
@@ -33,7 +36,7 @@ use std::collections::BTreeSet;
 use heimr_core::{
     Adapter, AdapterContext, AdapterDescriptor, AdapterError, Capabilities, ClimateCommand,
     ClimateMode, ClimateState, Command, CommandEnvelope, CommandKind, DeviceId, EmitError, Hold,
-    Metric, Setpoint, Unit, ZoneId,
+    Metric, SeriesTemplate, Setpoint, Unit, ZoneId,
 };
 use jiff::{SignedDuration, Timestamp};
 use serde::Deserialize;
@@ -90,6 +93,7 @@ const TAU_MIN: f64 = 30.0;
 pub struct Demo {
     zones: Vec<Zone>,
     rng: XorShift,
+    interval: SignedDuration,
 }
 
 #[derive(Debug)]
@@ -118,6 +122,18 @@ impl Adapter for Demo {
                 CommandKind::ClimateOff,
             ]),
         )
+        // Sampled every `interval` (the default's here), stamped by the
+        // host clock.
+        .with_series(SeriesTemplate::gauge(
+            Metric::TEMPERATURE,
+            Unit::Celsius,
+            default_interval(),
+        ))
+        .with_series(SeriesTemplate::gauge(
+            Metric::HUMIDITY,
+            Unit::Percent,
+            default_interval(),
+        ))
     }
     // ANCHOR_END: descriptor
 
@@ -161,9 +177,19 @@ impl Adapter for Demo {
         Ok(Self {
             zones,
             rng: XorShift::new(config.seed),
+            interval: config.interval,
         })
     }
     // ANCHOR_END: new
+
+    /// The kind's templates, expected every configured `interval`.
+    fn series(&self) -> Vec<SeriesTemplate> {
+        Self::descriptor()
+            .series
+            .into_iter()
+            .map(|t| t.with_expected_interval(self.interval))
+            .collect()
+    }
 
     // ANCHOR: run
     async fn run(mut self, mut ctx: AdapterContext<DemoConfig>) -> Result<(), AdapterError> {

@@ -19,8 +19,9 @@
 //! header names and values, JSON object keys, strings and numbers at any
 //! depth, and text bodies, for:
 //!
-//! - runs of 10 or more digits, inside any string (`/sites/<digits>/…`)
-//!   or as a JSON number; the fractional digits of a value that is a
+//! - runs of 10 or more digits (any Unicode digits), inside any string
+//!   (`/sites/<digits>/…`, a fraction included) or as a JSON number; the
+//!   fractional digits of a value that is a JSON
 //!   decimal number as a whole (`19.1234567890`) are not counted;
 //! - UUIDs (dashed, or 32 hex digits in a row), MAC addresses, e-mail
 //!   addresses and tokens;
@@ -39,12 +40,28 @@
 //!   whose name suggests a secret (redaction replaces them);
 //! - coordinates with more than two decimals.
 //!
+//! Redaction also replaces the values of per-request and trace id headers
+//! (`*-request-id`, `*-trace-id`, `*-cf-id`, `cf-ray`; any case) with
+//! `REDACTED`: they identify one exchange, so they are neither kept nor
+//! refused. Their values are not held to the id-key rule, but to every
+//! other check.
+//!
 //! Timestamps: an integer (or a string holding one) under a time-like key
 //! (`time`, `timestamp`, `ts`, `date`, `epoch`, `since`, `until`,
 //! `expires`, `created`, `updated`, `*_at`, `*At`, `*_time`, `*Time`, …)
 //! that reads as seconds, milliseconds, microseconds or nanoseconds since
 //! 1970 between the years 2000 and 2100 is not counted as a digit run.
 //! Anywhere else an epoch timestamp is a finding.
+//!
+//! Versions: a dotted version string (`1.4.20231215100512`, `v2.0.1-rc.1`;
+//! at least one dot, groups of at most 8 digits except one 12- or
+//! 14-digit date-time build stamp from 2000 to 2049, an optional `v` and a
+//! `-`/`+` suffix, and at most 12 digits in all outside the build stamp)
+//! under a version key (`version`, `firmware`, `fw`, or a named version
+//! such as `firmware_version`, `fwVersion`, `sw-version`, `appVersion`)
+//! is not counted as a long digit run. Any other value under a version key
+//! with ten or more digits in all, however split, is a finding; under
+//! other keys the digit-run rule applies.
 //!
 //! A finding is resolved by redacting the value ([`Redactor::key`];
 //! [`Redactor::literal`], which also applies to keys and names) or, for a
@@ -563,6 +580,19 @@ fn id_key(key: &str) -> bool {
         || camel
 }
 
+/// Whether a header names a per-request or trace id (`x-request-id`,
+/// `x-amz-cf-id`, `x-trace-id`, `cf-ray`, …; any case). Redaction
+/// replaces their values; the scan does not hold them to the id-key rule.
+fn trace_header(name: &str) -> bool {
+    let k = name.to_ascii_lowercase();
+    k == "cf-ray"
+        || k == "request-id"
+        || k == "trace-id"
+        || k.ends_with("-request-id")
+        || k.ends_with("-trace-id")
+        || k.ends_with("-cf-id")
+}
+
 /// JSON keys whose values identify a device, a person or a place.
 fn identifying_key(key: &str) -> Option<&'static str> {
     let k = key.to_ascii_lowercase();
@@ -835,13 +865,30 @@ fn looks_like_token(s: &str) -> bool {
     jwt || bearer
 }
 
-/// A run of 10 or more digits, not all zeros, anywhere in `s`; for a
-/// value that is one decimal number, in its integer part only.
+/// For a JSON number: a run of 10 or more digits, not all zeros, in its
+/// integer part (its fraction is a measurement, not an identifier).
 fn long_digits(s: &str) -> bool {
-    let text = integer_part(s).unwrap_or(s);
-    text.as_bytes()
-        .split(|b| !b.is_ascii_digit())
-        .any(|run| run.len() >= 10 && !run.iter().all(|&b| b == b'0'))
+    digit_run(integer_part(s).unwrap_or(s))
+}
+
+/// A run of 10 or more digits, not all zeros, anywhere in `s`. Any
+/// Unicode numeric character counts as a digit (full-width digits too).
+fn digit_run(s: &str) -> bool {
+    let mut run = 0usize;
+    let mut zeros = true;
+    for c in s.chars() {
+        if c.is_numeric() {
+            run += 1;
+            zeros &= c == '0';
+            if run >= 10 && !zeros {
+                return true;
+            }
+        } else {
+            run = 0;
+            zeros = true;
+        }
+    }
+    false
 }
 
 fn precise_coordinate(key: &str, v: &Value) -> bool {
@@ -959,6 +1006,13 @@ impl Redactor {
             i.request.query = self.names(&i.request.query);
             for r in &mut i.responses {
                 r.headers = self.names(&r.headers);
+                // Per-request and trace ids identify one exchange: neither
+                // kept nor refused.
+                for (k, v) in &mut r.headers {
+                    if trace_header(k) {
+                        *v = REDACTED.to_owned();
+                    }
+                }
                 r.json = r.json.as_ref().map(|j| self.json(j));
                 r.body = r.body.as_deref().map(|b| self.text(b));
             }
@@ -1022,7 +1076,9 @@ impl Redactor {
         }
     }
 
-    /// Query parameters or headers: names, credentials, values.
+    /// Query parameters or headers: names, credentials, values. A trace
+    /// header's value is not held to the id-key rule (redaction replaces
+    /// it), but still to every other check.
     fn scan_names(&self, at: &str, map: &BTreeMap<String, String>, found: &mut Vec<Finding>) {
         for (n, (k, v)) in map.iter().enumerate() {
             let loc = format!("{at}.{}", self.label(k, n));
@@ -1031,6 +1087,13 @@ impl Redactor {
                 self.report(&loc, "a credential", found);
             }
             if !self.key_allowed(Some(k)) {
+                // As for JSON keys: any real value under an identifying name.
+                if let Some(what) = identifying_key(k)
+                    && !trace_header(k)
+                    && !is_placeholder(&Value::String(v.clone()))
+                {
+                    self.report(&loc, what, found);
+                }
                 self.scan_str(&loc, Some(k), v, found);
             }
         }
@@ -1085,6 +1148,91 @@ impl Redactor {
     }
 }
 
+/// Whether `key` names a version (see the [module docs](self)):
+/// `version`, `firmware` or `fw`, or one of a few named versions
+/// (`firmware_version`, `fwVersion`, `sw-version`, …). A key that merely
+/// ends in "version" (`serialVersion`) does not count.
+fn version_like_key(key: &str) -> bool {
+    const PREFIXES: [&str; 8] = [
+        "firmware", "fw", "software", "sw", "hardware", "hw", "app", "os",
+    ];
+    let k = key.to_ascii_lowercase();
+    if matches!(k.as_str(), "version" | "firmware" | "fw") {
+        return true;
+    }
+    let Some(prefix) = k.strip_suffix("version") else {
+        return false;
+    };
+    let prefix = prefix.strip_suffix(['_', '-']).unwrap_or(prefix);
+    PREFIXES.contains(&prefix)
+}
+
+/// The most digits a version group may have, except one date-time group.
+const MAX_VERSION_DIGITS: usize = 8;
+
+/// The most digits a version may have in all, outside its one date-time
+/// group: a serial split into short groups is not a version.
+const MAX_VERSION_TOTAL: usize = 12;
+
+/// A version group of 12 or 14 digits that reads as a date-time
+/// (`YYYYMMDDhhmm[ss]`, years 2000 to 2049): a build stamp.
+fn date_time_group(g: &str) -> bool {
+    if !matches!(g.len(), 12 | 14) {
+        return false;
+    }
+    let n = |r: std::ops::Range<usize>| g.get(r).and_then(|x| x.parse::<u32>().ok());
+    let (Some(y), Some(mo), Some(d), Some(h), Some(mi)) =
+        (n(0..4), n(4..6), n(6..8), n(8..10), n(10..12))
+    else {
+        return false;
+    };
+    let s = if g.len() == 14 { n(12..14) } else { Some(0) };
+    (2000..2050).contains(&y)
+        && (1..=12).contains(&mo)
+        && (1..=31).contains(&d)
+        && h < 24
+        && mi < 60
+        && s.is_some_and(|s| s < 60)
+}
+
+/// A dotted version: an optional `v`, digit groups joined by dots (at
+/// least two, each of at most 8 digits, but for one 12- or 14-digit
+/// date-time), and an optional `-` or `+` suffix of letters, digits and
+/// dots; at most 12 digits in all outside the date-time group, the
+/// suffix's included (however letters split them).
+fn looks_like_version(s: &str) -> bool {
+    let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+    let (core, suffix) = match s.find(['-', '+']) {
+        Some(i) => (&s[..i], Some(&s[i + 1..])),
+        None => (s, None),
+    };
+    let groups: Vec<&str> = core.split('.').collect();
+    let digits = |g: &&str| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit());
+    let stamps = groups
+        .iter()
+        .filter(|g| g.len() > MAX_VERSION_DIGITS)
+        .count();
+    let stamp_digits: usize = groups
+        .iter()
+        .filter(|g| g.len() > MAX_VERSION_DIGITS)
+        .map(|g| g.len())
+        .sum();
+    let core_digits: usize = groups.iter().map(|g| g.len()).sum::<usize>() - stamp_digits;
+    let suffix_digits = suffix.map_or(0, |x| x.chars().filter(char::is_ascii_digit).count());
+    groups.len() >= 2
+        && core_digits + suffix_digits <= MAX_VERSION_TOTAL
+        && groups.iter().all(digits)
+        && groups
+            .iter()
+            .all(|g| g.len() <= MAX_VERSION_DIGITS || date_time_group(g))
+        && stamps <= 1
+        && suffix.is_none_or(|x| {
+            !x.is_empty()
+                && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+                && !digit_run(x)
+        })
+}
+
 /// A number (or numeric string) under a time-like key that reads as a
 /// plausible epoch time.
 fn timestamp(key: Option<&str>, text: &str) -> bool {
@@ -1115,7 +1263,16 @@ fn detect(s: &str, key: Option<&str>) -> Vec<&'static str> {
     if looks_like_token(s) {
         out.push("a token");
     }
-    if long_digits(s) && !timestamp(key, s) {
+    // Under a version key a value is a version, not a decimal number:
+    // unless it is version-shaped, ten digits in all are a finding,
+    // however dots or letters split them.
+    let long = if key.is_some_and(version_like_key) {
+        !looks_like_version(s) && s.chars().filter(|c| c.is_numeric()).count() >= 10
+    } else {
+        // A string is not a number: a fraction can hide a serial.
+        digit_run(s) && !timestamp(key, s)
+    };
+    if long {
         out.push("an identifier (a long digit string)");
     }
     out
@@ -1210,13 +1367,14 @@ mod tests {
             ],
         };
         assert!(!r.scan(&text).is_empty());
-        // Fractional digits of a decimal value are not an identifier.
+        // Fractional digits of a JSON number are not an identifier; in a
+        // string they can hide one.
         assert!(
             r.scan(&with_json(json!({ "value": 19.123_456_789_012 })))
                 .is_empty()
         );
         assert!(
-            r.scan(&with_json(json!({ "value": "19.1234567890123" })))
+            !r.scan(&with_json(json!({ "value": "19.1234567890123" })))
                 .is_empty()
         );
     }
@@ -1260,6 +1418,154 @@ mod tests {
             r.scan(&with_json(json!({ "device_id": "00A0000000", "id": 0 })))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_fraction_in_a_string_can_hide_a_serial() {
+        let long = "an identifier (a long digit string)";
+        for (key, v) in [
+            (Some("meter"), "0.12345678901234"),
+            (Some("note"), "1.12345678901"),
+            (
+                None,
+                "\u{ff11}\u{ff12}\u{ff13}\u{ff14}\u{ff15}\u{ff16}\u{ff17}\u{ff18}\u{ff19}\u{ff10}\u{ff11}",
+            ),
+        ] {
+            assert!(detect(v, key).contains(&long), "{key:?}: {v}");
+        }
+        // A JSON number's fraction is a measurement, not an identifier.
+        let mut c = Cassette::default();
+        c.push(
+            Interaction::get("/v1/status")
+                .json(200, serde_json::json!({ "meter": 19.123_456_789_012 })),
+        );
+        assert!(
+            Redactor::new().scan(&c).is_empty(),
+            "{:?}",
+            Redactor::new().scan(&c)
+        );
+        let mut c = Cassette::default();
+        c.push(
+            Interaction::get("/v1/status")
+                .json(200, serde_json::json!({ "meter": "19.123456789012" })),
+        );
+        assert_eq!(Redactor::new().scan(&c).len(), 1);
+    }
+
+    #[test]
+    fn trace_headers_are_replaced_not_refused() {
+        let names = [
+            "x-request-id",
+            "X-Request-Id",
+            "x-amz-cf-id",
+            "x-github-request-id",
+            "x-trace-id",
+            "CF-RAY",
+        ];
+        let mut c = Cassette::default();
+        let mut r = Interaction::get("/v1/status").json(200, serde_json::json!({}));
+        for n in names {
+            r.responses[0]
+                .headers
+                .insert(n.to_owned(), "f3b2a1-AbCdEf_0".to_owned());
+        }
+        c.push(r);
+        // Unredacted: values that are just opaque are not refused.
+        assert!(
+            Redactor::new().scan(&c).is_empty(),
+            "{:?}",
+            Redactor::new().scan(&c)
+        );
+        // Redacted: replaced with the placeholder.
+        let out = Redactor::new().redact(&c);
+        for n in names {
+            assert_eq!(out.interactions[0].responses[0].headers[n], REDACTED, "{n}");
+        }
+        // Other checks still apply to their values: a long digit run, an
+        // address.
+        let mut bad = Cassette::default();
+        let mut r = Interaction::get("/v1/status").json(200, serde_json::json!({}));
+        r.responses[0]
+            .headers
+            .insert("x-request-id".into(), "req-12345678901".into());
+        r.responses[0]
+            .headers
+            .insert("x-amz-cf-id".into(), "8.8.4.4".into());
+        bad.push(r);
+        let found = Redactor::new().scan(&bad);
+        assert_eq!(found.len(), 2, "{found:?}");
+        // Another id header is still held to the id-key rule.
+        let mut other = Cassette::default();
+        let mut r = Interaction::get("/v1/status").json(200, serde_json::json!({}));
+        r.responses[0]
+            .headers
+            .insert("x-device-id".into(), "kitchen".into());
+        other.push(r);
+        assert_eq!(Redactor::new().scan(&other).len(), 1);
+    }
+
+    #[test]
+    fn versions_pass_only_under_version_keys() {
+        let long = "an identifier (a long digit string)";
+        for (key, v) in [
+            ("version", "1.4.20231215100512"),
+            ("firmware_version", "v3.0.202312151005-rc.1"),
+            ("fwVersion", "2.0.12345678+build.7"),
+            ("firmware", "10.20231215100512"),
+            ("sw-version", "1.2.3"),
+        ] {
+            assert!(version_like_key(key) && looks_like_version(v), "{key}: {v}");
+            assert!(!detect(v, Some(key)).contains(&long), "{key}: {v}");
+        }
+        // Elsewhere, or not version-shaped, the digit-run rule stands.
+        for (key, v) in [
+            (Some("note"), "1.4.20231215100512"),
+            (None, "1.4.20231215100512"),
+            (Some("version"), "12345678901"),
+            (Some("version"), "SN-12345678901"),
+            (Some("version"), "1.2.12345678901-x/y"),
+            (Some("versions"), "1.4.20231215100512"),
+            // Groups of more than 8 digits that are not a date-time.
+            (Some("version"), "0.123456789012345"),
+            (Some("build"), "4012345678.1"),
+            (Some("firmware"), "v12345678901.0"),
+            (Some("version"), "1.20231315100512"),
+            (Some("version"), "1.20231215100512.20231215100512"),
+            // A serial split into short groups, or a date past the range.
+            (Some("version"), "1.40123456.78901234"),
+            (Some("appVersion"), "12345678.12345678"),
+            (Some("fw"), "1.0-rc.123456789.123456789"),
+            (Some("fw"), "1.0-a123456789b123456789"),
+            (Some("firmware"), "1.20991231235959"),
+            // A long digit run in the suffix.
+            (Some("fw"), "1.0+00123456789012"),
+            (Some("sw"), "1.2.3-SN12345678901"),
+            (Some("fwVersion"), "1.2.3-SN12345678901"),
+        ] {
+            assert!(detect(v, key).contains(&long), "{key:?}: {v}");
+        }
+        // Not a version key: a serial key, so any value is a finding.
+        let mut c = Cassette::default();
+        c.push(
+            Interaction::get("/v1/status")
+                .json(200, serde_json::json!({ "serialVersion": "1.12345678901" })),
+        );
+        c.push(
+            Interaction::get("/v1/info")
+                .query("serialVersion", "1.12345678901")
+                .json(200, serde_json::json!({})),
+        );
+        let found = Redactor::new().scan(&c);
+        // A serial key, and a long digit run (in a string, the fraction
+        // counts), in the body and in the query.
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert!(
+            found.iter().all(|f| f.location.contains("serialVersion")),
+            "{found:?}"
+        );
+        assert!(!version_like_key("build") && !version_like_key("sw"));
+        assert!(!version_like_key("serialVersion") && !version_like_key("serial_version"));
+        assert!(version_like_key("appVersion") && version_like_key("os_version"));
     }
 
     #[test]

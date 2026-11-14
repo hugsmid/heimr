@@ -22,7 +22,8 @@
 use std::time::Duration;
 
 use heimr_core::{
-    Adapter, AdapterContext, AdapterDescriptor, AdapterError, Capabilities, DeviceId, Metric, Unit,
+    Adapter, AdapterContext, AdapterDescriptor, AdapterError, Capabilities, DeviceId, Metric,
+    SeriesTemplate, Unit,
 };
 use jiff::{SignedDuration, Timestamp};
 use serde::Deserialize;
@@ -60,6 +61,7 @@ struct Status {
 #[derive(Debug)]
 pub struct ExampleSensor {
     url: reqwest::Url,
+    interval: SignedDuration,
 }
 
 /// Why one poll failed.
@@ -79,6 +81,19 @@ impl Adapter for ExampleSensor {
             "temperature and humidity from a sensor's HTTP JSON endpoint",
             Capabilities::read_only(),
         )
+        // One template per metric emitted: the core refuses anything
+        // else. Polled every `interval` (the default's here) and stamped
+        // by the host clock when polled.
+        .with_series(SeriesTemplate::gauge(
+            Metric::TEMPERATURE,
+            Unit::Celsius,
+            default_interval(),
+        ))
+        .with_series(SeriesTemplate::gauge(
+            Metric::HUMIDITY,
+            Unit::Percent,
+            default_interval(),
+        ))
     }
 
     fn new(config: &Config) -> Result<Self, AdapterError> {
@@ -95,7 +110,22 @@ impl Adapter for ExampleSensor {
                 "must be between 5s and 1h",
             ));
         }
-        Ok(Self { url })
+        Ok(Self {
+            url,
+            interval: config.interval,
+        })
+    }
+
+    /// The descriptor's templates state the default interval; this
+    /// instance's come every configured `interval`, so its series do not
+    /// read as stale (the staleness limit is 3 × the interval). Only the
+    /// intervals may differ from the descriptor's.
+    fn series(&self) -> Vec<SeriesTemplate> {
+        Self::descriptor()
+            .series
+            .into_iter()
+            .map(|t| t.with_expected_interval(self.interval))
+            .collect()
     }
 
     async fn run(self, ctx: AdapterContext<Config>) -> Result<(), AdapterError> {
@@ -104,6 +134,15 @@ impl Adapter for ExampleSensor {
             .build()
             .map_err(AdapterError::fatal)?;
         let interval = ctx.config().interval;
+        // Re-send on start. This sensor reports only its present values,
+        // stamped when polled, so there is nothing to re-send. A source
+        // with history (an API answering with past slots or hours) would
+        // re-send its whole last fetch window here, and after an error,
+        // identically: the same `t`, value bits and quality, and on a
+        // versioned series the same `changed_at`, kept per key in
+        // `ctx.state_dir()` with `heimr_core::Revisions` (saved before
+        // anything it minted is sent). The store will drop the repeats. See
+        // "How heimr talks to the store" in the adapter guide.
         let mut next = ctx.now();
         loop {
             tokio::select! {
@@ -161,9 +200,8 @@ impl ExampleSensor {
             .map_err(|e| Poll::Retry(format!("reading the answer: {e}")))?;
         let s: Status = serde_json::from_slice(&body)
             .map_err(|e| Poll::Retry(format!("unexpected answer: {e}")))?;
-        if !s.temperature.is_finite() || !s.humidity.is_finite() {
-            return Err(Poll::Retry("the sensor reported a non-finite value".into()));
-        }
+        // Values are sent as they come, never filtered: the store will record
+        // a non-finite one as bad quality.
         Ok(s)
     }
 }

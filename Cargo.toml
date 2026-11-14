@@ -32,7 +32,7 @@ rustix = { version = "1.1.6", default-features = false, features = ["fs", "param
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_ignored = "0.1.14"
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 thiserror = "2.0.21"
 toml = "1.2.1"
 tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "time"] }
@@ -46,6 +46,8 @@ heimr = { path = "crates/heimr" }
 heimr-core = { path = "crates/heimr-core" }
 heimr-system = { path = "crates/heimr-system" }
 heimr-testkit = { path = "crates/heimr-testkit" }
+heimr-weather = { path = "crates/heimr-weather" }
+weather = { path = "crates/weather" }
 
 [profile.release]
 lto = "thin"

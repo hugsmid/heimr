@@ -10,8 +10,11 @@
 //!
 //! ```text
 //! 2030-01-01T00:00:00Z reading under-test sensor-1 temperature 20.5 °C
+//! 2030-01-01T00:00:00Z forecast under-test tariff unit_rate 0.184 ¤/kWh for 2030-01-02T00:00:00Z..2030-01-02T00:30:00Z published
 //! 2030-01-01T00:00:00Z event under-test adapter_health {"previous":"unknown","reason":null,"status":"ok"}
 //! ```
+//!
+//! A forecast's leading time is its issue time.
 //!
 //! Values use Rust's shortest round-trip float formatting; event payloads
 //! are JSON with sorted keys. Quality is shown only when not `good`.
@@ -83,22 +86,27 @@ impl Render {
             let src = &env.source;
             let line = match &env.record {
                 Record::Reading(r) => {
-                    let q = if r.quality == Quality::Good {
-                        String::new()
-                    } else {
-                        format!(
-                            " ({})",
-                            serde_json::to_string(&r.quality)
-                                .unwrap_or_default()
-                                .trim_matches('"')
-                        )
-                    };
+                    let q = quality(r.quality);
                     format!(
                         "{t} reading {src} {} {} {} {}{q}",
                         r.device,
                         r.metric,
                         self.value(r.value),
                         r.unit
+                    )
+                }
+                Record::Forecast(f) => {
+                    let basis = serde_json::to_string(&f.basis).unwrap_or_default();
+                    format!(
+                        "{t} forecast {src} {} {} {} {} for {}..{} {}{}",
+                        f.device,
+                        f.metric,
+                        self.value(f.value),
+                        f.unit,
+                        self.time(f.valid_from),
+                        self.time(f.valid_to),
+                        basis.trim_matches('"'),
+                        quality(f.quality)
                     )
                 }
                 Record::Event(e) => {
@@ -122,6 +130,20 @@ impl Render {
             let _ = writeln!(out, "{line}");
         }
         out
+    }
+}
+
+/// ` (estimated)` and the like; nothing for good quality.
+fn quality(q: Quality) -> String {
+    if q == Quality::Good {
+        String::new()
+    } else {
+        format!(
+            " ({})",
+            serde_json::to_string(&q)
+                .unwrap_or_default()
+                .trim_matches('"')
+        )
     }
 }
 

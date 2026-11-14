@@ -258,8 +258,8 @@ mod tests {
 
     fn response(time: Vec<i64>, cols: Vec<Vec<Option<f64>>>) -> HourlyResponse {
         HourlyResponse {
-            latitude: 50.73,
-            longitude: -3.47,
+            latitude: 64.15,
+            longitude: -21.94,
             elevation: Some(45.0),
             generationtime_ms: Some(0.1),
             utc_offset_seconds: 0,

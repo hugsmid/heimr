@@ -6,6 +6,7 @@ use serde_json::json;
 
 /// The demo's data is synthetic: there is no upstream to count traffic,
 /// fail or interrupt.
+const POLLED: &str = "polled: no record-on-change series";
 const NO_UPSTREAM: &str = "synthetic data: no upstream to count traffic or simulate faults";
 
 #[test]
@@ -23,6 +24,7 @@ fn demo_conforms() {
         .expect_skip("fault.rejected_is_fatal", NO_UPSTREAM)
         .expect_skip("fault.malformed_no_panic", NO_UPSTREAM)
         .expect_note("records.monotonic", NO_UPSTREAM)
+        .expect_note("records.keep_alive", POLLED)
         .expect_note("commands.shadow", NO_UPSTREAM)
         .run()
         .assert_passed();

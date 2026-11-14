@@ -1,7 +1,7 @@
 //! Print the next 24 hours of forecast for a latitude/longitude.
 //!
 //! ```sh
-//! cargo run -p weather --example forecast -- 50.7275 -3.4747
+//! cargo run -p weather --example forecast -- 64.15 -21.94   # Reykjavík, as an example
 //! ```
 //! Times are UTC. Set `OPEN_METEO_FORECAST_URL` to use another host.
 //! Weather data by Open-Meteo.com (CC BY 4.0).

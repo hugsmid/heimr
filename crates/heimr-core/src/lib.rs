@@ -2,10 +2,15 @@
 //! [heimr](https://github.com/hugsmid/heimr).
 //!
 //! - **Types**: [`ZoneId`], [`DeviceId`], [`Reading`] (shaped like the
-//!   store's `reading` row), [`Event`], climate/fan/switch state and
+//!   time, source, device, metric, value, unit, quality), [`Forecast`] (a published or modelled value
+//!   for a period, such as a tariff rate or a weather forecast), [`Event`],
+//!   climate/fan/switch state and
 //!   [`Command`]s. Every override carries a [`Hold`] (until the next
 //!   schedule change, or for a bounded time). Setpoints are [`Setpoint`]s,
 //!   checked against a [`SetpointBand`] when built and again by the actuator.
+//! - **Series templates** ([`SeriesTemplate`]): per metric, how what an
+//!   adapter kind emits maps to a stored series (kind, unit, expected
+//!   interval, time source, versioned, record-on-change).
 //! - **Adapter API**: implement [`Adapter`] (typed) and register it; the app
 //!   runs it through the object-safe [`AdapterFactory`]. Everything an
 //!   instance may touch arrives in an [`AdapterContext`]: its typed config,
@@ -67,6 +72,8 @@ pub mod context;
 pub mod domain;
 pub mod id;
 pub mod record;
+pub mod revision;
+pub mod series;
 pub mod shutdown;
 pub mod site;
 pub mod telemetry;
@@ -92,7 +99,15 @@ pub use domain::{
     Hold, HoldDuration, HoldError, SwitchCommand, SwitchState,
 };
 pub use id::{CommandId, CommandIdError, CommandIds, DeviceId, IdError, ZoneId};
-pub use record::{Envelope, Event, Quality, Reading, ReadingError, Record, StateClass, StateKey};
+pub use record::{
+    Basis, DEFAULT_FORECAST_HORIZON, Envelope, Event, Forecast, ForecastError, MAX_FUTURE_SKEW,
+    Quality, Reading, Record, StateClass, StateKey, revision_time,
+};
+pub use revision::{Revision, Revisions, write_durably};
+pub use series::{
+    DEFAULT_LATENESS_BOUND, DEFAULT_STALENESS_INTERVALS, Retention, SeriesError, SeriesKind,
+    SeriesRole, SeriesTemplate, TimeSource,
+};
 pub use shutdown::{Shutdown, ShutdownTrigger, shutdown_channel};
 pub use site::{Currency, Site, SiteError};
 pub use telemetry::{

@@ -45,14 +45,13 @@ pub fn run_scenarios(
     expect: &Expectations,
     make_driver: &mut dyn FnMut() -> Result<Box<dyn Driver>, String>,
 ) -> Report {
-    let only: Option<Vec<String>> = std::env::var(ONLY_ENV).ok().map(|v| {
-        v.split(',')
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
+    let (only, ci_error) = only_filter(
+        std::env::var(ONLY_ENV).ok().as_deref(),
+        std::env::var("CI").ok().as_deref(),
+    );
     let known = |id: &str| scenarios.iter().any(|s| s.id() == id);
     let mut errors = expect.declaration_errors.clone();
+    errors.extend(ci_error);
     for id in expect.declarations.keys().filter(|id| !known(id)) {
         errors.push(format!("declaration for unknown scenario id {id:?}"));
     }
@@ -90,6 +89,30 @@ pub fn run_scenarios(
         results,
         errors,
     }
+}
+
+/// The scenario filter from [`ONLY_ENV`]'s value, unless `CI` is set (to
+/// anything but empty, `0` or `false`): in CI a filtered run would pass
+/// while hiding scenarios, so the filter is ignored and an error reported.
+fn only_filter(only: Option<&str>, ci: Option<&str>) -> (Option<Vec<String>>, Option<String>) {
+    let Some(only) = only else {
+        return (None, None);
+    };
+    let in_ci = ci.is_some_and(|v| !matches!(v.trim(), "" | "0" | "false"));
+    if in_ci {
+        return (
+            None,
+            Some(format!(
+                "{ONLY_ENV} is set in CI ({only:?}); every scenario was run: unset it"
+            )),
+        );
+    }
+    let ids = only
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (Some(ids), None)
 }
 
 /// The conformance suite for one adapter kind.
@@ -249,6 +272,14 @@ impl Suite {
         self
     }
 
+    /// Run the app with `forecast_horizon = d` and check forecasts against
+    /// it (default [`heimr_core::DEFAULT_FORECAST_HORIZON`]).
+    #[must_use]
+    pub fn forecast_horizon(mut self, d: SignedDuration) -> Self {
+        self.expect.forecast_horizon = d;
+        self
+    }
+
     /// Allow records stamped up to `d` ahead of the clock (default 1 s).
     #[must_use]
     pub fn max_future(mut self, d: SignedDuration) -> Self {
@@ -349,6 +380,7 @@ impl Suite {
         let mut options = DriverOptions::new(site);
         options.clock = self.clock;
         options.shutdown_deadline = self.expect.shutdown_deadline;
+        options.forecast_horizon = self.expect.forecast_horizon;
         let factory = self.factory.clone();
         let upstreams = self.upstreams.clone();
         let mut make = || -> Result<Box<dyn Driver>, String> {
@@ -360,5 +392,27 @@ impl Suite {
         let report = run_scenarios(&kind, &catalogue(), &self.expect, &mut make);
         println!("{report}");
         report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_filter_is_refused_in_ci() {
+        assert_eq!(only_filter(None, Some("true")), (None, None));
+        let (ids, err) = only_filter(Some("a, b,"), None);
+        assert_eq!(ids, Some(vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(err, None);
+        for off in ["", "0", "false"] {
+            assert!(only_filter(Some("a"), Some(off)).1.is_none(), "{off:?}");
+        }
+        let (ids, err) = only_filter(Some("a"), Some("true"));
+        assert_eq!(ids, None, "every scenario runs");
+        assert_eq!(
+            err.as_deref(),
+            Some("HEIMR_TESTKIT_ONLY is set in CI (\"a\"); every scenario was run: unset it")
+        );
     }
 }

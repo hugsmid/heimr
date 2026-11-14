@@ -19,9 +19,9 @@ fn json(name: &str) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(fixture(name))
 }
 
-/// The Met Office headquarters in Exeter: a neutral public coordinate.
-fn exeter() -> Location {
-    Location::new(50.7275, -3.4747).unwrap()
+/// Reykjavík, as an example location.
+fn reykjavik() -> Location {
+    Location::new(64.15, -21.94).unwrap()
 }
 
 fn client(server: &MockServer) -> Client {
@@ -35,8 +35,8 @@ fn client(server: &MockServer) -> Client {
 
 /// The query every request must carry so units and times are unambiguous.
 fn common(m: wiremock::MockBuilder) -> wiremock::MockBuilder {
-    m.and(query_param("latitude", "50.7275"))
-        .and(query_param("longitude", "-3.4747"))
+    m.and(query_param("latitude", "64.15"))
+        .and(query_param("longitude", "-21.94"))
         .and(query_param(
             "hourly",
             "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,\
@@ -63,7 +63,7 @@ async fn forecast_rows_carry_the_callers_issued_at() {
 
     let issued: Timestamp = "2026-11-12T05:00:00Z".parse().unwrap();
     let points = client(&server)
-        .forecast(exeter(), &ForecastOptions::days(2), IssuedAt::At(issued))
+        .forecast(reykjavik(), &ForecastOptions::days(2), IssuedAt::At(issued))
         .await
         .unwrap();
     assert_eq!(points.len(), 48);
@@ -94,7 +94,7 @@ async fn fetch_time_issued_at_is_taken_around_the_request() {
         models: Some("ukmo_seamless".into()),
     };
     let points = client(&server)
-        .forecast(exeter(), &opts, IssuedAt::FetchTime)
+        .forecast(reykjavik(), &opts, IssuedAt::FetchTime)
         .await
         .unwrap();
     let after = Timestamp::now();
@@ -109,7 +109,11 @@ async fn forecast_days_out_of_range_never_hits_the_network() {
     let c = client(&server);
     for days in [0, 17] {
         let err = c
-            .forecast(exeter(), &ForecastOptions::days(days), IssuedAt::FetchTime)
+            .forecast(
+                reykjavik(),
+                &ForecastOptions::days(days),
+                IssuedAt::FetchTime,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, Error::InvalidRequest(_)), "{err}");
@@ -130,7 +134,7 @@ async fn archive_observations_and_degree_days() {
 
     let obs = client(&server)
         .archive(
-            exeter(),
+            reykjavik(),
             "2026-01-10".parse().unwrap(),
             "2026-01-11".parse().unwrap(),
         )
@@ -166,13 +170,13 @@ async fn historical_forecast_uses_its_own_host() {
         .build()
         .unwrap();
     let day = "2026-11-08".parse().unwrap();
-    let obs = c.historical_forecast(exeter(), day, day).await.unwrap();
+    let obs = c.historical_forecast(reykjavik(), day, day).await.unwrap();
     assert_eq!(obs.len(), 24);
     assert_eq!(obs[0].time, "2026-11-08T00:00:00Z".parse().unwrap());
     assert!(archive.received_requests().await.unwrap().is_empty());
 
     let err = c
-        .archive(exeter(), day, "2026-11-07".parse().unwrap())
+        .archive(reykjavik(), day, "2026-11-07".parse().unwrap())
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidRequest(_)));
@@ -188,7 +192,7 @@ async fn api_error_400_maps_reason() {
         .mount(&server)
         .await;
     let err = client(&server)
-        .forecast(exeter(), &ForecastOptions::days(1), IssuedAt::FetchTime)
+        .forecast(reykjavik(), &ForecastOptions::days(1), IssuedAt::FetchTime)
         .await
         .unwrap_err();
     match err {
@@ -213,7 +217,7 @@ async fn rate_limit_429_maps_retry_after_and_reason() {
         .await;
     let day = "2026-01-10".parse().unwrap();
     let err = client(&server)
-        .archive(exeter(), day, day)
+        .archive(reykjavik(), day, day)
         .await
         .unwrap_err();
     match err {
@@ -241,12 +245,12 @@ async fn other_statuses_and_bad_bodies() {
         .await;
     let c = client(&server);
     let err = c
-        .forecast(exeter(), &ForecastOptions::days(1), IssuedAt::FetchTime)
+        .forecast(reykjavik(), &ForecastOptions::days(1), IssuedAt::FetchTime)
         .await
         .unwrap_err();
     assert!(matches!(err, Error::Status { status: 502, .. }), "{err}");
     let day = "2026-01-10".parse().unwrap();
-    let err = c.archive(exeter(), day, day).await.unwrap_err();
+    let err = c.archive(reykjavik(), day, day).await.unwrap_err();
     assert!(matches!(err, Error::Decode(_)), "{err}");
 }
 
@@ -267,12 +271,15 @@ async fn unit_and_length_drift_is_rejected() {
         .await;
     let c = client(&server);
     let day = "2026-01-10".parse().unwrap();
-    let err = c.archive(exeter(), day, day).await.unwrap_err();
+    let err = c.archive(reykjavik(), day, day).await.unwrap_err();
     assert!(
         matches!(&err, Error::UnitMismatch { column, .. } if column == "wind_speed_10m"),
         "{err}"
     );
-    let err = c.historical_forecast(exeter(), day, day).await.unwrap_err();
+    let err = c
+        .historical_forecast(reykjavik(), day, day)
+        .await
+        .unwrap_err();
     assert!(
         matches!(
             &err,
@@ -296,7 +303,7 @@ async fn api_key_is_sent_as_query_parameter() {
         .api_key(SecretString::from("test-key-not-real"))
         .build()
         .unwrap();
-    c.forecast(exeter(), &ForecastOptions::days(2), IssuedAt::FetchTime)
+    c.forecast(reykjavik(), &ForecastOptions::days(2), IssuedAt::FetchTime)
         .await
         .unwrap();
 }

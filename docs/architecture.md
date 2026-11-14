@@ -127,7 +127,7 @@ Publishing rules for this repository: no secrets; no real readings, schedules or
 
 Planner, assistant and recorder never depend on a specific adapter. They work with the domain types in `heimr-core`:
 
-- **Records** an adapter emits: readings (shaped like the store's `reading` row: time, source, device, metric, value, unit, quality), typed state per device class, and events.
+- **Records** an adapter emits: readings (time, source, device, metric, value, unit, quality), typed state per device class, and events.
 - **Device classes and commands**: climate (heating zones: set target, resume schedule, turn off), fan (air-treatment devices such as purifiers, fans or ventilation units: off, auto, a manual level or a named preset, limited to the levels and presets the adapter declares) and switch (on or off). An adapter declares which command kinds it carries out; the core refuses the rest.
 - **Holds**: every command that overrides a device (a setpoint, heating off, a fan mode) carries a `Hold`: until the device's next schedule change, or for a bounded time (at most the policy's `max_hold`, 2 hours by default and never more than 24). Adapters map a hold to the device's own timed override, so the device reverts by itself if heimr stops.
 - **Setpoints** are `Setpoint`s: they cannot leave an absolute envelope of 5–30 °C and are checked against the policy's band (15–24 °C by default, narrowed by configuration).

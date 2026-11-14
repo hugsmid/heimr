@@ -18,6 +18,7 @@ fn conformance() {
     .invalid("interval", json!({ "interval": "1s" }))
     .expect_skip("commands.shadow", "read-only sensor: no commands")
     .expect_skip("commands.live", "read-only sensor: no commands")
+    .expect_note("records.keep_alive", "polled: no record-on-change series")
     .run()
     .assert_passed();
 }

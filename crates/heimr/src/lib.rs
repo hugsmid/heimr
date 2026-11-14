@@ -14,7 +14,7 @@
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Config::load("heimr.toml")?;
 //! let app = App::builder(config)
-//!     .public_adapters()          // demo and system (host metrics)
+//!     .public_adapters()          // demo, system (host metrics), open-meteo (weather)
 //!     // .adapter::<MyPrivateAdapter>()
 //!     .build()
 //!     .await?;

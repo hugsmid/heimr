@@ -32,7 +32,8 @@
 //! - **Harness** ([`Harness`]): run one adapter directly with a real
 //!   context on a [`ManualClock`](heimr_core::ManualClock), for unit tests
 //!   of its behaviour; records land in memory, commands go through a real
-//!   actuator with an in-memory audit log.
+//!   actuator with an in-memory audit log, and
+//!   [`Harness::restart`] restarts it on the same state directory.
 //! - **Record/replay** ([`replay`], feature `replay`, on by default): serve
 //!   a JSON cassette on a local mock server, simulate outages, rejected
 //!   credentials and garbage, and save recordings only after redaction and

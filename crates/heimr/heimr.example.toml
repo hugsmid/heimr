@@ -16,6 +16,9 @@ currency = "EUR"              # ISO 4217 code
 state_dir = "/var/lib/heimr"
 # How long adapters get to stop after SIGINT/SIGTERM.
 shutdown_grace = "10s"
+# How far past its issue time a forecast (a published price, a weather
+# forecast) may reach; the core refuses forecasts beyond it.
+# forecast_horizon = "384h"   # 16 days
 
 [log]
 # tracing filter; RUST_LOG overrides it.

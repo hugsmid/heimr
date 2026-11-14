@@ -6,6 +6,7 @@ use heimr_system::System;
 use heimr_testkit::Suite;
 use serde_json::json;
 
+const POLLED: &str = "polled: no record-on-change series";
 const READ_ONLY: &str = "read-only adapter: no commands";
 const NO_COUNT: &str = "the fixture file tree does not count reads or writes";
 
@@ -18,6 +19,7 @@ fn conformance() {
         .invalid("units", json!({ "units": ["../escape.service"] }))
         .expect_skip("commands.shadow", READ_ONLY)
         .expect_skip("commands.live", READ_ONLY)
+        .expect_note("records.keep_alive", POLLED)
         .expect_skip("config.no_io_in_new", NO_COUNT)
         .expect_skip("commands.no_unsolicited_writes", NO_COUNT)
         .expect_skip("fault.no_hot_loop", NO_COUNT)

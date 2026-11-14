@@ -49,19 +49,20 @@ More detail: [`docs/architecture.md`](docs/architecture.md).
 | NixOS modules | `nix/modules` (upcoming) | Reusable NixOS modules for the app and its supporting services, exported as flake `nixosModules` |
 | Adapter template | `templates/adapter` | Starting point for a new adapter crate, with a conformance test |
 
-Listing a crate here means it exists, nothing more. `octopus-energy` and `weather` are standalone client libraries, not yet wired into the app as adapters; `heimr-system` is an adapter, registered in the default binary. Which adapters run is decided entirely by your configuration.
+Listing a crate here means it exists, nothing more. `octopus-energy` and `weather` are standalone client libraries; `heimr-system` and `heimr-weather` are adapters, registered in the default binary. Which adapters run is decided entirely by your configuration.
 
 | Crate | Integration | State |
 |---|---|---|
 | `octopus-energy` | Energy prices and smart-meter data from Octopus Energy (UK): tariffs, half-hourly Agile prices, consumption, live demand | Client library; implemented and tested against hand-built fixtures |
 | `weather` | Weather observations and forecasts from Open-Meteo | Client library; implemented and tested against hand-built fixtures |
+| `heimr-weather` | Hourly weather forecasts and recent hours from Open-Meteo, on the `weather` client | Adapter, registered in the default binary as `open-meteo`; read-only; tested against replays of hand-built fixtures |
 | `heimr-system` | The machine's own health: CPU, memory, disks, network, temperatures, processes and services (Linux) | Adapter, registered in the default binary as `system`; tested against hand-built fixtures |
 
 Planned: price-aware planning of heating and switchable loads, derived analytics (cost, degree-days, heat-loss estimates), a provider-neutral LLM client for the assistant, and adapters for generic local protocols (HomeKit Accessory Protocol, Matter, ESPHome native API, MQTT).
 
 ## Status
 
-- **Exists:** the adapter contract (kinds, configured instances, typed commands with holds); the command safety layer (policy checks, rate limits, a durable audit journal written before delivery, shadow mode by default, a submit-only handle for deciders); per-instance supervision and telemetry; typed configuration and the `App` builder; a synthetic `demo` adapter; a `system` adapter for host metrics; the adapter test kit and template; energy-price and weather clients.
+- **Exists:** the adapter contract (kinds, configured instances, typed commands with holds); the command safety layer (policy checks, rate limits, a durable audit journal written before delivery, shadow mode by default, a submit-only handle for deciders); per-instance supervision and telemetry; typed configuration and the `App` builder; a synthetic `demo` adapter; a `system` adapter for host metrics; an `open-meteo` weather adapter; forecasts and money units in the record model; series templates per metric (kind, unit, expected interval, versioning) and `Revisions`, stable revision markers for sources that publish none; the adapter test kit and template; energy-price and weather clients.
 - **Next:** reusable NixOS modules.
 - **Under evaluation:** the storage engine. An embedded time-series engine plus a Parquet archive is the working assumption; candidates are being benchmarked. See [`docs/architecture.md`](docs/architecture.md#4-data-model-and-retention).
 - **Not started:** the recorder (writing records to the store), dashboard, planner logic, analytics, assistant, native protocol stacks.

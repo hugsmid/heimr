@@ -10,8 +10,9 @@ use std::time::Duration;
 use heimr_core::{
     ACTUATOR, ActorError, Actuator, ActuatorError, Adapter, AdapterDescriptor, AdapterError,
     AdapterFactory, AdapterInstance, AuditLog, Capabilities, CommandSubmitter, ContextParts,
-    Emitter, Envelope, Event, InstanceSpec, Mode, RegisterError, SharedClock, Shutdown,
-    ShutdownTrigger, Site, StatsHandle, SystemClock, TypedFactory, shutdown_channel,
+    Currency, Emitter, Envelope, Event, InstanceSpec, Mode, RegisterError, SeriesTemplate,
+    SharedClock, Shutdown, ShutdownTrigger, Site, StatsHandle, SystemClock, TypedFactory,
+    shutdown_channel,
 };
 use jiff::SignedDuration;
 use serde_json::json;
@@ -64,7 +65,7 @@ pub enum Error {
 }
 
 /// What [`AppBuilder::check`] found for one configured instance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct AdapterPlan {
     /// Instance name.
@@ -73,6 +74,9 @@ pub struct AdapterPlan {
     pub descriptor: AdapterDescriptor,
     /// What this instance can do.
     pub capabilities: Capabilities,
+    /// This instance's series templates: the kind's, with the intervals
+    /// its configuration sets.
+    pub series: Vec<SeriesTemplate>,
     /// Whether the instance is enabled.
     pub enabled: bool,
     /// Shadow or live.
@@ -150,12 +154,14 @@ impl AppBuilder {
     }
 
     /// Register the adapter kinds that ship with heimr: `demo`
-    /// ([`Demo`](crate::demo::Demo)) and `system` (host metrics,
-    /// [`heimr_system::System`]).
+    /// ([`Demo`](crate::demo::Demo)), `system` (host metrics,
+    /// [`heimr_system::System`]) and `open-meteo` (weather,
+    /// [`heimr_weather::OpenMeteo`]).
     #[must_use]
     pub fn public_adapters(self) -> Self {
         self.adapter::<crate::demo::Demo>()
             .adapter::<heimr_system::System>()
+            .adapter::<heimr_weather::OpenMeteo>()
     }
 
     /// Add a sink (in addition to the logging sink, if enabled in config).
@@ -185,7 +191,8 @@ impl AppBuilder {
     }
 
     /// Validate the configuration against the registered kinds: unknown
-    /// kinds, unknown keys, adapter-specific checks, `live` on read-only
+    /// kinds, kinds quoting a currency other than `[site].currency`,
+    /// unknown keys, adapter-specific checks, `live` on read-only
     /// instances. Disabled instances are validated too. Touches no state;
     /// typed adapters do no I/O here, while an out-of-process adapter's
     /// factory may ask its adapter (see [`AdapterFactory::prepare`]).
@@ -214,6 +221,11 @@ impl AppBuilder {
                 .into());
             };
             let descriptor = factory.descriptor();
+            // A kind quoting another currency cannot run here: heimr does
+            // not convert.
+            descriptor.check_site(&site).map_err(|e| {
+                ConfigError::invalid(format!("adapters.{name}.type"), e.to_string())
+            })?;
             let instance = factory
                 .prepare(&section.settings, &site)
                 .await
@@ -232,6 +244,12 @@ impl AppBuilder {
                 )
                 .into());
             }
+            let series = instance
+                .series()
+                .unwrap_or_else(|| descriptor.series.clone());
+            descriptor
+                .check_instance_series(&series)
+                .map_err(|e| ConfigError::invalid(format!("adapters.{name}"), e.to_string()))?;
             if section.mode == Mode::Live && !capabilities.can_write() {
                 return Err(ConfigError::invalid(
                     format!("adapters.{name}.mode"),
@@ -244,6 +262,7 @@ impl AppBuilder {
                     name: name.clone(),
                     descriptor,
                     capabilities,
+                    series,
                     enabled: section.enabled,
                     mode: section.mode,
                 },
@@ -300,6 +319,8 @@ impl AppBuilder {
             supervised.push(Supervised {
                 state_dir: state_dir.join("adapters").join(&name),
                 name,
+                currency: p.plan.descriptor.source_currency,
+                series: p.plan.series.clone().into(),
                 kind: p.plan.descriptor.kind,
                 mode: p.plan.mode,
                 capabilities: p.plan.capabilities,
@@ -319,6 +340,7 @@ impl AppBuilder {
         Ok(App {
             site: config.site()?,
             grace: self.config.heimr.shutdown_grace,
+            horizon: self.config.heimr.forecast_horizon,
             supervision: self.config.supervision,
             supervised,
             actuator,
@@ -337,6 +359,10 @@ impl AppBuilder {
 struct Supervised {
     name: String,
     kind: String,
+    /// The kind's declared source currency (money units allowed).
+    currency: Option<Currency>,
+    /// The kind's series templates.
+    series: Arc<[SeriesTemplate]>,
     mode: Mode,
     capabilities: Capabilities,
     factory: Arc<dyn AdapterFactory>,
@@ -353,6 +379,7 @@ struct Supervised {
 pub struct App {
     site: Site,
     grace: SignedDuration,
+    horizon: SignedDuration,
     supervision: Supervision,
     supervised: Vec<Supervised>,
     actuator: Actuator,
@@ -435,6 +462,7 @@ impl App {
         let Self {
             site,
             grace,
+            horizon,
             supervision,
             supervised,
             actuator,
@@ -469,6 +497,7 @@ impl App {
             grace: Duration::try_from(grace).unwrap_or_default(),
             policy: supervision,
             site,
+            horizon,
         };
         let mut tasks = JoinSet::new();
         let mut names = BTreeMap::new();
@@ -529,6 +558,7 @@ struct Env {
     grace: Duration,
     policy: Supervision,
     site: Site,
+    horizon: SignedDuration,
 }
 
 impl Env {
@@ -639,8 +669,12 @@ async fn supervise(mut s: Supervised, env: Env) {
             Ok(c) => c,
             Err(e) => return stay_down(&s.name, &s.stats, &env, failures + 1, e.to_string()).await,
         };
-        let emitter =
-            Emitter::for_adapter(s.name.as_str(), env.records.clone()).with_stats(s.stats.clone());
+        let emitter = Emitter::for_adapter(s.name.as_str(), env.records.clone())
+            .with_stats(s.stats.clone())
+            .with_source_currency(s.currency)
+            .with_series(s.series.iter().cloned())
+            .with_forecast_horizon(env.horizon)
+            .with_clock(env.clock.clone());
         let parts = ContextParts::new(
             emitter,
             env.clock.clone(),

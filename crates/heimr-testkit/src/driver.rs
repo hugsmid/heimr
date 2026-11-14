@@ -8,8 +8,8 @@
 //! the adapter leaks into the scenarios.
 
 use heimr_core::{
-    AdapterDescriptor, AdapterStats, AuditRecord, Capabilities, Command, Envelope, Mode, Outcome,
-    Rejection,
+    AdapterDescriptor, AdapterStats, AuditRecord, Capabilities, Command, Currency, Envelope, Mode,
+    Outcome, Rejection, SeriesTemplate,
 };
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -101,10 +101,33 @@ pub trait Driver {
     /// capabilities.
     fn prepare(&mut self, settings: &serde_json::Value) -> Result<Capabilities, PrepareFailure>;
 
+    /// The series templates of an instance built from [`Driver::settings`]
+    /// (the kind's, with the intervals its configuration sets). The
+    /// default is the kind's.
+    fn series(&mut self) -> Vec<SeriesTemplate> {
+        self.descriptor().series
+    }
+
+    /// Check one instance with [`Driver::settings`] as the app would for a
+    /// site quoting `currency` (the site's time zone unchanged), without
+    /// running it: the app's own checks (a kind's declared source currency
+    /// must match the site's) as well as the adapter's. `Err` carries the
+    /// app's message.
+    fn check_site(&mut self, currency: Currency) -> Result<(), String>;
+
     /// Start a fresh app (or host) running one instance with
     /// [`Driver::settings`] in `mode`, on a fake clock reading
     /// [`Driver::now`]. Ends any previous run first.
     fn start(&mut self, mode: Mode) -> Result<(), String>;
+
+    /// Stop the current run and start the instance again in `mode` on the
+    /// same state directory, upstream and clock (carrying on from now), as
+    /// a restart of the whole app would. A driver that cannot keep them
+    /// returns `Err`, and the restart scenario is skipped.
+    fn restart(&mut self, mode: Mode) -> Result<(), String> {
+        let _ = mode;
+        Err("this driver cannot restart an instance on the same state".into())
+    }
 
     /// Let `by` pass on the fake clock, running the instance meanwhile.
     fn advance(&mut self, by: SignedDuration);
@@ -122,6 +145,14 @@ pub trait Driver {
     /// Every record the instance has emitted in the current (or last) run,
     /// in order, as the core stamped them.
     fn records(&self) -> Vec<Envelope>;
+
+    /// The same records split by run of the instance: a new list starts
+    /// each time the supervisor (re)starts it. The default is one list;
+    /// a driver that can see restarts should split them, or repeats across
+    /// a restart are judged as repeats within one run.
+    fn runs(&self) -> Vec<Vec<Envelope>> {
+        vec![self.records()]
+    }
 
     /// Supervisor-reported failures in the current (or last) run.
     fn failures(&self) -> Vec<Failure>;

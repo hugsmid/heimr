@@ -14,15 +14,15 @@ use weather::{Client, ForecastOptions, IssuedAt, Location};
 
 # async fn run() -> Result<(), weather::Error> {
 let client = Client::new()?;
-let exeter = Location::new(50.7275, -3.4747)?;
+let reykjavik = Location::new(64.15, -21.94)?; // an example location
 let points = client
-    .forecast(exeter, &ForecastOptions::days(2), IssuedAt::FetchTime)
+    .forecast(reykjavik, &ForecastOptions::days(2), IssuedAt::FetchTime)
     .await?;
 println!("{} rows, first at {}", points.len(), points[0].valid_at);
 # Ok(()) }
 ```
 
-Example: `cargo run -p weather --example forecast -- 50.7275 -3.4747`.
+Example (Reykjavík): `cargo run -p weather --example forecast -- 64.15 -21.94`.
 
 ## Behaviour worth knowing
 - **Time**: every request sends `timeformat=unixtime` and `timezone=GMT`; all times are `jiff::Timestamp` (UTC). Forecast rows start at 00:00 UTC today. Precipitation and radiation describe the hour *before* the timestamp.

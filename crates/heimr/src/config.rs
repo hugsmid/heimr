@@ -120,6 +120,10 @@ pub struct General {
     /// How long instances get to stop after a shutdown signal before they
     /// are aborted.
     pub shutdown_grace: SignedDuration,
+    /// How far past its issue time a forecast may reach
+    /// (`valid_to - issued_at`); the core refuses forecasts beyond it.
+    /// Default 16 days (`"384h"`).
+    pub forecast_horizon: SignedDuration,
 }
 
 impl Default for General {
@@ -127,6 +131,7 @@ impl Default for General {
         Self {
             state_dir: PathBuf::from("/var/lib/heimr"),
             shutdown_grace: SignedDuration::from_secs(10),
+            forecast_horizon: heimr_core::DEFAULT_FORECAST_HORIZON,
         }
     }
 }
@@ -485,6 +490,12 @@ impl Config {
                 "must be positive",
             ));
         }
+        if self.heimr.forecast_horizon <= SignedDuration::ZERO {
+            return Err(ConfigError::invalid(
+                "heimr.forecast_horizon",
+                "must be positive",
+            ));
+        }
         tracing_subscriber::EnvFilter::try_new(&self.log.filter)
             .map_err(|e| ConfigError::invalid("log.filter", e.to_string()))?;
         let policy = self.safety.policy()?;
@@ -622,6 +633,15 @@ mod tests {
         assert!(c.adapters.is_empty());
         let p = c.safety.policy().unwrap();
         assert_eq!(p, SafetyPolicy::default());
+        assert_eq!(
+            c.heimr.forecast_horizon,
+            heimr_core::DEFAULT_FORECAST_HORIZON
+        );
+        let longer = parse("[heimr]\nforecast_horizon = \"400h\"").unwrap();
+        assert_eq!(
+            longer.heimr.forecast_horizon,
+            SignedDuration::from_hours(400)
+        );
         assert!(!p.allow_heating_off);
     }
 
@@ -664,6 +684,7 @@ mod tests {
         }
         assert!(err("[log]\nfilter = \"[[[\"").starts_with("log.filter:"));
         assert!(err("[heimr]\nshutdown_grace = \"0s\"").starts_with("heimr.shutdown_grace"));
+        assert!(err("[heimr]\nforecast_horizon = \"0s\"").starts_with("heimr.forecast_horizon"));
         assert!(err("[audit]\nretain_files = 1").starts_with("audit.retain_files"));
         assert!(
             err("[supervision]\nbackoff_initial = \"10s\"\nbackoff_max = \"1s\"")

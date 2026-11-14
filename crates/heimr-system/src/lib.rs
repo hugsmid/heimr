@@ -16,8 +16,23 @@
 //! | `unit:<name>` | `unit.cpu` (% of one core), `unit.memory` (B), `unit.tasks`, `unit.read`/`.write` (B/s) — systemd units on cgroup v2 |
 //! | `hub` | the hub process itself: `proc.cpu`, `proc.rss`, `proc.threads`, `proc.fds`, `proc.read`/`.write` |
 //!
+//! Every series is stamped by the host clock when sampled and expected
+//! every `interval` ([`series_template`]); `uptime`, `net.errors` and
+//! `net.drops` are counters, the rest gauges. All are diagnostics
+//! (retention class `Diagnostic`).
+//!
+//! Host metrics multiply quickly (per core, disk, interface, process and
+//! unit), so series are counted and capped: `series` lists the ones to
+//! send (default all), and `max_series` (default 1 000) is a ceiling. A
+//! new series beyond it is not sent, and health is degraded saying how
+//! many were held back. The count is the custom gauge `series`. The `top`
+//! processes are off by default: their names churn, and each new name is
+//! a new series that would fill the ceiling; name the processes to watch
+//! in `processes` instead, or opt in with `top`.
+//!
 //! Rates need two samples, so they start with the second one. Processes
-//! are grouped by command name; the `top` names by CPU and by memory are
+//! are grouped by command name; the `top` names by CPU and by memory (if
+//! opted in) are
 //! reported each sample, and so are the `processes` named in the config.
 //!
 //! <!-- ANCHOR: toml -->
@@ -25,7 +40,7 @@
 //! [adapters.host]
 //! type = "system"
 //! interval = "10s"                 # 1s ..= 1h
-//! top = 5                          # top process names by CPU and by memory (0 = none)
+//! top = 5                          # top process names by CPU and by memory (default 0: none)
 //! processes = ["heimr", "sshd"]
 //! units = ["heimr.service"]        # systemd units (cgroup v2)
 //! # mounts = ["/", "/var"]         # default: every block-device filesystem
@@ -33,6 +48,8 @@
 //! # per_core = true
 //! # temperatures = true
 //! # hub = true
+//! # series = ["cpu.usage", "memory.*", "host/load.1"]   # default: all
+//! # max_series = 1000
 //! # proc_path = "/proc"            # e.g. "/host/proc" in a container
 //! # sys_path = "/sys"
 //! # cgroup_path = "/sys/fs/cgroup"
@@ -59,7 +76,10 @@ pub mod sampler;
 
 use std::path::PathBuf;
 
-use heimr_core::{Adapter, AdapterContext, AdapterDescriptor, AdapterError, Capabilities, Metric};
+use heimr_core::{
+    Adapter, AdapterContext, AdapterDescriptor, AdapterError, Capabilities, Metric, Retention,
+    SeriesTemplate,
+};
 use jiff::{SignedDuration, Timestamp};
 use serde::Deserialize;
 
@@ -101,7 +121,9 @@ pub struct Config {
     /// Processes always reported, by command name.
     #[serde(default)]
     pub processes: Vec<String>,
-    /// Top process names by CPU and by memory (0 ..= 50; default 5).
+    /// Top process names by CPU and by memory (0 ..= 50; default 0, none).
+    /// Opt-in: the names change, and each new one is a new `proc:` series
+    /// counted against `max_series`.
     #[serde(default = "default_top")]
     pub top: usize,
     /// systemd units on cgroup v2: a unit name (looked up in
@@ -111,6 +133,16 @@ pub struct Config {
     /// The hub process's own stats.
     #[serde(default = "yes")]
     pub hub: bool,
+    /// Only these series (default: all). An entry is a metric name
+    /// (`cpu.usage`), a metric prefix ending in `.*` (`proc.*`), or one
+    /// device's metric (`host/load.1`).
+    #[serde(default)]
+    pub series: Vec<String>,
+    /// The most series (device and metric pairs) the instance sends
+    /// (1 ..= 100 000; default 1 000). New series beyond it are not sent,
+    /// and health is degraded saying how many were held back.
+    #[serde(default = "default_max_series")]
+    pub max_series: usize,
 }
 
 impl Default for Config {
@@ -129,7 +161,109 @@ impl Default for Config {
             top: default_top(),
             units: Vec::new(),
             hub: true,
+            series: Vec::new(),
+            max_series: default_max_series(),
         }
+    }
+}
+
+fn default_max_series() -> usize {
+    1000
+}
+
+/// The highest `max_series`.
+pub const MAX_SERIES: usize = 100_000;
+
+/// One `series` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Allow {
+    Metric(&'static str),
+    Prefix(String),
+    Exact(String, &'static str),
+}
+
+/// Which series an instance sends: the allow-list, then the ceiling.
+/// Counts every series it has let through.
+#[derive(Debug, Clone)]
+pub struct SeriesGate {
+    allow: Vec<Allow>,
+    max: usize,
+    seen: std::collections::HashSet<(u32, SystemMetric)>,
+}
+
+/// What [`SeriesGate::admit`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Admit {
+    /// Send it.
+    Yes,
+    /// Not in the allow-list.
+    NotListed,
+    /// A new series beyond the ceiling.
+    OverCeiling,
+}
+
+impl SeriesGate {
+    /// A gate for the `series` allow-list (empty: all) and the
+    /// `max_series` ceiling. Errors name the offending entry.
+    pub fn new(series: &[String], max: usize) -> Result<Self, String> {
+        let known = |name: &str| {
+            SystemMetric::ALL
+                .iter()
+                .find(|m| m.name() == name)
+                .map(|m| m.name())
+        };
+        let mut allow = Vec::with_capacity(series.len());
+        for e in series {
+            let entry = if let Some(prefix) = e.strip_suffix(".*") {
+                let p = format!("{prefix}.");
+                if !SystemMetric::ALL.iter().any(|m| m.name().starts_with(&p)) {
+                    return Err(format!("{e:?} matches no metric"));
+                }
+                Allow::Prefix(p)
+            } else if let Some((device, metric)) = e.rsplit_once('/') {
+                let m = known(metric).ok_or_else(|| format!("{e:?}: unknown metric {metric:?}"))?;
+                if device.is_empty() {
+                    return Err(format!("{e:?}: empty device"));
+                }
+                Allow::Exact(device.to_owned(), m)
+            } else {
+                Allow::Metric(known(e).ok_or_else(|| format!("unknown metric {e:?}"))?)
+            };
+            allow.push(entry);
+        }
+        Ok(Self {
+            allow,
+            max,
+            seen: std::collections::HashSet::new(),
+        })
+    }
+
+    /// Whether to send `metric` of device `device` (interned as `index`).
+    pub fn admit(&mut self, index: u32, device: &str, metric: SystemMetric) -> Admit {
+        let name = metric.name();
+        let listed = self.allow.is_empty()
+            || self.allow.iter().any(|a| match a {
+                Allow::Metric(m) => *m == name,
+                Allow::Prefix(p) => name.starts_with(p.as_str()),
+                Allow::Exact(d, m) => d == device && *m == name,
+            });
+        if !listed {
+            return Admit::NotListed;
+        }
+        if self.seen.contains(&(index, metric)) {
+            return Admit::Yes;
+        }
+        if self.seen.len() >= self.max {
+            return Admit::OverCeiling;
+        }
+        self.seen.insert((index, metric));
+        Admit::Yes
+    }
+
+    /// How many series have been let through.
+    pub fn count(&self) -> usize {
+        self.seen.len()
     }
 }
 
@@ -148,14 +282,17 @@ fn default_root() -> PathBuf {
 fn yes() -> bool {
     true
 }
+/// No top-N processes by default: their names change from sample to
+/// sample, and every new name is a new series that fills `max_series`.
 fn default_top() -> usize {
-    5
+    0
 }
 
 /// The `system` adapter. See the [crate docs](crate).
 #[derive(Debug)]
 pub struct System {
     options: Options,
+    interval: SignedDuration,
 }
 
 const MAX_LIST: usize = 64;
@@ -196,15 +333,34 @@ fn check_path(key: &str, p: &std::path::Path) -> Result<(), AdapterError> {
     }
 }
 
+/// The series template of one metric: sampled by the host clock every
+/// `interval` (the default configuration's, 10 s); totals since boot are
+/// counters (they restart from zero at boot), everything else a gauge.
+pub fn series_template(m: SystemMetric) -> SeriesTemplate {
+    let metric = Sampler::metric(m);
+    let interval = default_interval();
+    let t = match m {
+        SystemMetric::Uptime | SystemMetric::NetErrors | SystemMetric::NetDrops => {
+            SeriesTemplate::counter(metric, m.unit(), interval, None)
+        }
+        _ => SeriesTemplate::gauge(metric, m.unit(), interval),
+    };
+    // Host health is diagnostics: kept for a shorter time.
+    t.with_retention(Retention::Diagnostic)
+}
+
 impl Adapter for System {
     type Config = Config;
 
     fn descriptor() -> AdapterDescriptor {
-        AdapterDescriptor::new(
+        let d = AdapterDescriptor::new(
             "system",
             "the host's CPU, memory, disks, network, temperatures, processes and services",
             Capabilities::read_only(),
-        )
+        );
+        SystemMetric::ALL
+            .iter()
+            .fold(d, |d, m| d.with_series(series_template(*m)))
     }
 
     fn new(c: &Config) -> Result<Self, AdapterError> {
@@ -227,6 +383,15 @@ impl Adapter for System {
         check_list("interfaces", &c.interfaces, false)?;
         check_list("processes", &c.processes, false)?;
         check_list("units", &c.units, true)?;
+        check_list("series", &c.series, false)?;
+        if !(1..=MAX_SERIES).contains(&c.max_series) {
+            return Err(AdapterError::config_key(
+                "max_series",
+                format!("must be between 1 and {MAX_SERIES}"),
+            ));
+        }
+        SeriesGate::new(&c.series, c.max_series)
+            .map_err(|e| AdapterError::config_key("series", e))?;
         let mut o = Options::new(&c.proc_path, &c.sys_path);
         if let Some(p) = &c.cgroup_path {
             o.cgroup_path = p.clone();
@@ -240,7 +405,19 @@ impl Adapter for System {
         o.top = c.top;
         o.units = c.units.clone();
         o.hub = c.hub;
-        Ok(Self { options: o })
+        Ok(Self {
+            options: o,
+            interval: c.interval,
+        })
+    }
+
+    /// The kind's templates, expected every configured `interval`.
+    fn series(&self) -> Vec<SeriesTemplate> {
+        Self::descriptor()
+            .series
+            .into_iter()
+            .map(|t| t.with_expected_interval(self.interval))
+            .collect()
     }
 
     async fn run(self, ctx: AdapterContext<Config>) -> Result<(), AdapterError> {
@@ -249,6 +426,8 @@ impl Adapter for System {
             .map(|m| Sampler::metric(*m))
             .collect();
         let interval = ctx.config().interval;
+        let mut gate = SeriesGate::new(&ctx.config().series, ctx.config().max_series)
+            .map_err(|e| AdapterError::config_key("series", e))?;
         let mut sampler = Some(Box::new(Sampler::new(self.options)));
         let mut out: Vec<Sample> = Vec::with_capacity(512);
         let mut next = ctx.now();
@@ -280,9 +459,17 @@ impl Adapter for System {
                     "the sampler was cancelled"
                 })
             })?;
+            // Every value is sent as sampled: a non-finite one (none is
+            // expected) is recorded by the store as bad quality.
+            let mut held = 0usize;
             for x in &samples {
-                if !x.value.is_finite() {
-                    continue;
+                match gate.admit(x.device, s.device(x.device).as_str(), x.metric) {
+                    Admit::Yes => {}
+                    Admit::NotListed => continue,
+                    _ => {
+                        held += 1;
+                        continue;
+                    }
                 }
                 let r = ctx
                     .reading(
@@ -294,9 +481,17 @@ impl Adapter for System {
                     .with_time(now);
                 ctx.emit(r).await?;
             }
-            match problem {
-                None => ctx.health().ok().await?,
-                Some(p) => ctx.health().degraded(p).await?,
+            ctx.metrics().gauge("series", gate.count() as f64);
+            let over = (held > 0).then(|| {
+                format!(
+                    "{held} more series would exceed max_series ({}); not sent",
+                    ctx.config().max_series
+                )
+            });
+            match (problem, over) {
+                (None, None) => ctx.health().ok().await?,
+                (Some(p), None) | (None, Some(p)) => ctx.health().degraded(p).await?,
+                (Some(p), Some(o)) => ctx.health().degraded(format!("{p}; {o}")).await?,
             }
             samples.clear();
             out = samples;
@@ -316,6 +511,103 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn the_gate_applies_the_allow_list_then_the_ceiling() {
+        let list = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let mut g = SeriesGate::new(&list(&["cpu.usage", "memory.*", "host/load.1"]), 3).unwrap();
+        use SystemMetric as M;
+        assert_eq!(g.admit(0, "cpu", M::CpuUsage), Admit::Yes);
+        assert_eq!(g.admit(0, "cpu", M::CpuUser), Admit::NotListed);
+        assert_eq!(g.admit(1, "host", M::Load1), Admit::Yes);
+        assert_eq!(
+            g.admit(2, "box", M::Load1),
+            Admit::NotListed,
+            "another device"
+        );
+        assert_eq!(g.admit(1, "host", M::MemTotal), Admit::Yes);
+        assert_eq!(g.count(), 3);
+        // At the ceiling: known series still pass, new ones do not.
+        assert_eq!(g.admit(1, "host", M::MemUsed), Admit::OverCeiling);
+        assert_eq!(g.admit(0, "cpu", M::CpuUsage), Admit::Yes);
+        assert_eq!(g.count(), 3);
+        // An empty list allows every metric.
+        let mut all = SeriesGate::new(&[], 10).unwrap();
+        assert_eq!(all.admit(7, "proc:x", M::ProcFds), Admit::Yes);
+        for (bad, why) in [
+            ("cpu.nope", "unknown metric"),
+            ("nothing.*", "matches no metric"),
+            ("/load.1", "empty device"),
+            ("host/load.9", "unknown metric"),
+        ] {
+            let e = SeriesGate::new(&list(&[bad]), 10).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn series_settings_are_checked() {
+        let with = |v: serde_json::Value| {
+            let mut c = serde_json::json!({});
+            for (k, x) in v.as_object().unwrap() {
+                c[k] = x.clone();
+            }
+            System::new(&serde_json::from_value(c).unwrap())
+        };
+        assert!(with(serde_json::json!({ "series": ["proc.*"], "max_series": 5 })).is_ok());
+        for bad in [
+            serde_json::json!({ "series": ["load"] }),
+            serde_json::json!({ "max_series": 0 }),
+            serde_json::json!({ "max_series": 100_001 }),
+        ] {
+            match with(bad.clone()) {
+                Err(AdapterError::Config { key: Some(k), .. }) => {
+                    assert_eq!(k, bad.as_object().unwrap().keys().next().unwrap().as_str());
+                }
+                other => panic!("{bad}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn instance_series_follow_the_configured_interval() {
+        let c: Config = serde_json::from_value(serde_json::json!({ "interval": "60s" })).unwrap();
+        let s = System::new(&c).unwrap().series();
+        let d = System::descriptor();
+        assert_eq!(s.len(), d.series.len());
+        assert!(
+            s.iter()
+                .all(|t| t.expected_interval == SignedDuration::from_mins(1))
+        );
+        assert!(
+            s.iter()
+                .all(|t| t.staleness_limit() == SignedDuration::from_mins(3))
+        );
+        assert!(
+            d.series
+                .iter()
+                .all(|t| t.expected_interval == SignedDuration::from_secs(10))
+        );
+        d.check_instance_series(&s).unwrap();
+    }
+
+    #[test]
+    fn top_processes_are_opt_in() {
+        assert_eq!(Config::default().top, 0);
+        let c: Config = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(c.top, 0);
+    }
+
+    #[test]
+    fn every_template_is_diagnostic() {
+        let d = System::descriptor();
+        assert_eq!(d.series.len(), SystemMetric::ALL.len());
+        assert!(
+            d.series
+                .iter()
+                .all(|t| t.retention == Retention::Diagnostic)
+        );
+    }
 
     #[test]
     fn defaults_are_valid_on_every_platform() {

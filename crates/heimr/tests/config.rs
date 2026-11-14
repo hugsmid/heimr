@@ -76,7 +76,7 @@ fn instance_errors_name_the_key() {
     );
     assert_eq!(
         check("[adapters.x]\ntype = \"nope\"").unwrap_err(),
-        "adapters.x.type: no adapter kind \"nope\" in this build (available: demo, system)"
+        "adapters.x.type: no adapter kind \"nope\" in this build (available: demo, open-meteo, system)"
     );
     assert_eq!(
         check("[adapters.demo]\ntype = \"demo\"\nzones = []").unwrap_err(),
@@ -201,4 +201,121 @@ fn dynamic_kinds_register_and_validate() {
         .check_now()
         .unwrap_err();
     assert!(err.to_string().contains("registered twice"));
+}
+
+/// A kind whose source quotes prices in euros.
+struct Priced;
+
+impl Adapter for Priced {
+    type Config = serde_json::Value;
+    fn descriptor() -> AdapterDescriptor {
+        const EUR: heimr::core::Currency = heimr::core::Currency::of("EUR");
+        AdapterDescriptor::new("priced", "quotes EUR", Capabilities::read_only())
+            .with_source_currency(EUR)
+    }
+    fn new(_: &serde_json::Value) -> Result<Self, AdapterError> {
+        Ok(Self)
+    }
+    async fn run(self, ctx: AdapterContext<serde_json::Value>) -> Result<(), AdapterError> {
+        ctx.shutdown().wait().await;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_kind_quoting_another_currency_is_refused() {
+    let at = |zone: &str, currency: &str| {
+        let toml = format!(
+            "[adapters.prices]\ntype = \"priced\"\n[site]\ntime_zone = \"{zone}\"\ncurrency = \"{currency}\"\n"
+        );
+        App::builder(Config::from_toml_str(&toml).unwrap())
+            .adapter::<Priced>()
+            .check_now()
+            .map_err(|e| e.to_string())
+    };
+    assert!(at("Europe/Berlin", "EUR").is_ok());
+    assert_eq!(
+        at("America/New_York", "USD").unwrap_err(),
+        "adapters.prices.type: adapter kind \"priced\" quotes prices in EUR, but [site].currency is USD; heimr does not convert currencies"
+    );
+    // Disabled instances are validated too.
+    let toml = "[adapters.prices]\ntype = \"priced\"\nenabled = false\n[site]\ntime_zone = \"UTC\"\ncurrency = \"USD\"\n";
+    let err = App::builder(Config::from_toml_str(toml).unwrap())
+        .adapter::<Priced>()
+        .check_now()
+        .unwrap_err();
+    assert!(err.to_string().contains("EUR"), "{err}");
+}
+
+/// A kind whose instances set their series' intervals from `every`, and
+/// (wrongly) their unit from `unit`.
+#[derive(Debug, serde::Deserialize)]
+struct EveryConfig {
+    every: jiff::SignedDuration,
+    #[serde(default)]
+    percent: bool,
+}
+
+struct Every {
+    every: jiff::SignedDuration,
+    percent: bool,
+}
+
+impl Adapter for Every {
+    type Config = EveryConfig;
+    fn descriptor() -> AdapterDescriptor {
+        AdapterDescriptor::new("every", "polls every so often", Capabilities::read_only())
+            .with_series(heimr::core::SeriesTemplate::gauge(
+                heimr::core::Metric::TEMPERATURE,
+                heimr::core::Unit::Celsius,
+                jiff::SignedDuration::from_secs(10),
+            ))
+    }
+    fn new(c: &EveryConfig) -> Result<Self, AdapterError> {
+        Ok(Self {
+            every: c.every,
+            percent: c.percent,
+        })
+    }
+    fn series(&self) -> Vec<heimr::core::SeriesTemplate> {
+        let mut t = Self::descriptor()
+            .series
+            .remove(0)
+            .with_expected_interval(self.every);
+        if self.percent {
+            t.unit = heimr::core::Unit::Percent;
+        }
+        vec![t]
+    }
+    async fn run(self, ctx: AdapterContext<EveryConfig>) -> Result<(), AdapterError> {
+        ctx.shutdown().wait().await;
+        Ok(())
+    }
+}
+
+/// An instance's series follow its configured interval; anything beyond
+/// the intervals differing from the kind's is refused.
+#[test]
+fn instance_series_carry_the_configured_interval() {
+    let check = |extra: &str| {
+        App::builder(parse(&format!(
+            "[adapters.e]\ntype = \"every\"\nevery = \"1m\"\n{extra}"
+        )))
+        .adapter::<Every>()
+        .check_now()
+    };
+    let plans = check("").unwrap();
+    assert_eq!(
+        plans[0].series[0].expected_interval,
+        jiff::SignedDuration::from_mins(1)
+    );
+    assert_eq!(
+        plans[0].descriptor.series[0].expected_interval,
+        jiff::SignedDuration::from_secs(10)
+    );
+    let err = check("percent = true").unwrap_err().to_string();
+    assert_eq!(
+        err,
+        "adapters.e: instance series template for reading temperature is not its kind's (only the intervals may differ)"
+    );
 }

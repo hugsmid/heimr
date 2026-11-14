@@ -28,9 +28,9 @@ use std::time::Duration;
 
 use heimr_core::{
     Actuator, Adapter, AdapterError, AdapterFactory, AdapterStats, AuditRecord, Command,
-    CommandRequest, CommandSubmitter, ContextParts, Emitter, Envelope, Event, InstanceSpec,
-    ManualClock, MemoryAuditLog, Mode, Outcome, Reading, Record, Rejection, SafetyPolicy,
-    ShutdownTrigger, Site, StatsHandle, TypedFactory, shutdown_channel,
+    CommandRequest, CommandSubmitter, ContextParts, Emitter, Envelope, Event, Forecast,
+    InstanceSpec, ManualClock, MemoryAuditLog, Mode, Outcome, Reading, Record, Rejection,
+    SafetyPolicy, ShutdownTrigger, Site, StatsHandle, TypedFactory, shutdown_channel,
 };
 use jiff::SignedDuration;
 use tokio::sync::mpsc;
@@ -47,9 +47,15 @@ const SETTLE_IO: Duration = Duration::from_millis(5);
 
 /// One adapter instance running under test. See the [module docs](self).
 pub struct Harness {
+    factory: Arc<dyn AdapterFactory>,
+    settings: serde_json::Value,
+    site: Site,
     clock: ManualClock,
+    tx: mpsc::Sender<Envelope>,
     rx: mpsc::Receiver<Envelope>,
     seen: Vec<Envelope>,
+    /// Where each run after the first starts in `seen`.
+    run_starts: Vec<usize>,
     stats: StatsHandle,
     trigger: ShutdownTrigger,
     task: Option<JoinHandle<Result<(), AdapterError>>>,
@@ -89,13 +95,19 @@ impl Harness {
     }
 
     /// Run any factory's instance in `mode` for `site`. Fails as the app
-    /// would if the settings are refused.
+    /// would if the settings are refused, or if the kind quotes a currency
+    /// other than the site's.
     pub async fn start_with(
         factory: impl AdapterFactory,
         settings: serde_json::Value,
         mode: Mode,
         site: Site,
     ) -> Result<Self, AdapterError> {
+        let factory: Arc<dyn AdapterFactory> = Arc::new(factory);
+        let descriptor = factory.descriptor();
+        descriptor
+            .check_site(&site)
+            .map_err(|e| AdapterError::config(e.to_string()))?;
         let instance = factory.prepare(&settings, &site).await?;
         let clock = ManualClock::new(t0());
         let audit = MemoryAuditLog::new();
@@ -108,36 +120,38 @@ impl Harness {
             .build()
             .await
             .map_err(setup)?;
-        let kind = factory.descriptor().kind;
         actuator
             .register(InstanceSpec::new(
                 INSTANCE,
-                &kind,
+                &descriptor.kind,
                 instance.capabilities(),
                 mode,
             ))
             .map_err(|e| AdapterError::config(e.to_string()))?;
-        let commands = actuator.attach(INSTANCE).await.map_err(setup)?;
         let stats = actuator.stats(INSTANCE).ok_or_else(|| setup("no stats"))?;
         let (tx, rx) = mpsc::channel(65_536);
-        let emitter = Emitter::for_adapter(INSTANCE, tx).with_stats(stats.clone());
-        let (trigger, shutdown) = shutdown_channel();
         let dir = TempDir::new("harness").map_err(setup)?;
-        let parts = ContextParts::new(
-            emitter,
-            Arc::new(clock.clone()),
-            shutdown,
-            dir.path().to_owned(),
-            stats.for_instance(),
-            site,
-        )
-        .with_commands(commands);
         let submitter = actuator.submitter(ACTOR).map_err(setup)?;
-        let task = tokio::spawn(instance.run(parts));
+        let (trigger, task) = launch(
+            instance,
+            &actuator,
+            &descriptor,
+            &tx,
+            &stats,
+            &clock,
+            &dir,
+            &site,
+        )
+        .await?;
         let mut h = Self {
+            factory,
+            settings,
+            site,
             clock,
+            tx,
             rx,
             seen: Vec::new(),
+            run_starts: Vec::new(),
             stats,
             trigger,
             task: Some(task),
@@ -204,6 +218,30 @@ impl Harness {
         &self.seen
     }
 
+    /// Everything emitted so far, one list per run ([`Harness::restart`]
+    /// starts a new one), for [`checks::monotonic`](crate::checks::monotonic).
+    pub fn runs(&mut self) -> Vec<Vec<Envelope>> {
+        self.drain();
+        let mut bounds = vec![0];
+        bounds.extend(&self.run_starts);
+        bounds.push(self.seen.len());
+        bounds
+            .windows(2)
+            .map(|w| self.seen[w[0]..w[1]].to_vec())
+            .collect()
+    }
+
+    /// Forecasts emitted so far.
+    pub fn forecasts(&mut self) -> Vec<Forecast> {
+        self.records()
+            .iter()
+            .filter_map(|e| match &e.record {
+                Record::Forecast(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Readings emitted so far.
     pub fn readings(&mut self) -> Vec<Reading> {
         self.records()
@@ -255,6 +293,39 @@ impl Harness {
     /// Signal shutdown and wait (up to 5 s real time) for `run` to return.
     /// Returns its result; a run that overstays or panics is an error.
     pub async fn stop(mut self) -> Result<Vec<Envelope>, AdapterError> {
+        self.end_run().await?;
+        Ok(std::mem::take(&mut self.seen))
+    }
+
+    /// Restart the instance as a restart of the whole app would: stop the
+    /// run as [`Harness::stop`] does (returning its error, if any, without
+    /// starting again), then build the instance afresh from the same
+    /// settings and run it with the same state directory. The clock and
+    /// the records seen so far carry on, so a test can check what is
+    /// re-sent across the restart ([`Harness::runs`]).
+    pub async fn restart(&mut self) -> Result<(), AdapterError> {
+        self.end_run().await?;
+        self.run_starts.push(self.seen.len());
+        let descriptor = self.factory.descriptor();
+        let instance = self.factory.prepare(&self.settings, &self.site).await?;
+        let (trigger, task) = launch(
+            instance,
+            &self.actuator,
+            &descriptor,
+            &self.tx,
+            &self.stats,
+            &self.clock,
+            &self.dir,
+            &self.site,
+        )
+        .await?;
+        self.trigger = trigger;
+        self.task = Some(task);
+        self.settle().await;
+        Ok(())
+    }
+
+    async fn end_run(&mut self) -> Result<(), AdapterError> {
         self.trigger.trigger();
         let result = match self.task.take() {
             None => Ok(()),
@@ -269,6 +340,46 @@ impl Harness {
         };
         self.actuator.detach(INSTANCE).await;
         self.drain();
-        result.map(|()| std::mem::take(&mut self.seen))
+        result
     }
+}
+
+/// Attach a command queue and start one run of `instance`, with an
+/// emitter wired as the app wires it (source currency, default forecast
+/// horizon, the clock).
+#[allow(clippy::too_many_arguments)]
+async fn launch(
+    instance: Box<dyn heimr_core::AdapterInstance>,
+    actuator: &Actuator,
+    descriptor: &heimr_core::AdapterDescriptor,
+    tx: &mpsc::Sender<Envelope>,
+    stats: &StatsHandle,
+    clock: &ManualClock,
+    dir: &TempDir,
+    site: &Site,
+) -> Result<(ShutdownTrigger, JoinHandle<Result<(), AdapterError>>), AdapterError> {
+    let series = instance
+        .series()
+        .unwrap_or_else(|| descriptor.series.clone());
+    // As the app does: only the intervals may differ from the kind's.
+    descriptor
+        .check_instance_series(&series)
+        .map_err(|e| AdapterError::config(e.to_string()))?;
+    let commands = actuator.attach(INSTANCE).await.map_err(setup)?;
+    let emitter = Emitter::for_adapter(INSTANCE, tx.clone())
+        .with_stats(stats.clone())
+        .with_source_currency(descriptor.source_currency)
+        .with_series(series)
+        .with_clock(Arc::new(clock.clone()));
+    let (trigger, shutdown) = shutdown_channel();
+    let parts = ContextParts::new(
+        emitter,
+        Arc::new(clock.clone()),
+        shutdown,
+        dir.path().to_owned(),
+        stats.for_instance(),
+        site.clone(),
+    )
+    .with_commands(commands);
+    Ok((trigger, tokio::spawn(instance.run(parts))))
 }

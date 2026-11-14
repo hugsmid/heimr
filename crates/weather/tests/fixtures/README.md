@@ -7,7 +7,7 @@
 - `hourly` as parallel arrays: `time` in Unix seconds plus one array per variable, with `null` for missing values;
 - error bodies `{"error": true, "reason": "…"}` (the `reason` texts are paraphrased from client test suites, not copied from a live response).
 
-Values are synthetic (a smooth diurnal cycle), not real weather. The location is the Met Office headquarters in Exeter, snapped to a plausible grid cell (`50.73, -3.47`).
+Values are synthetic (a smooth diurnal cycle), not real weather. The location is an example grid cell near Reykjavík (`64.15, -21.94`); nothing depends on it.
 
 | File | Content |
 |---|---|

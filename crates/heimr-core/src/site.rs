@@ -53,9 +53,40 @@ pub struct Currency([u8; 3]);
 impl Currency {
     /// Validate a code.
     pub fn new(code: &str) -> Result<Self, SiteError> {
-        match code.as_bytes() {
-            &[a, b, c] if [a, b, c].iter().all(u8::is_ascii_uppercase) => Ok(Self([a, b, c])),
-            _ => Err(SiteError::InvalidCurrency(code.to_owned())),
+        Self::parse(code.as_bytes()).ok_or_else(|| SiteError::InvalidCurrency(code.to_owned()))
+    }
+
+    /// A code known when the program is written, for an adapter's
+    /// descriptor. Bind it to a `const` so a bad code fails to compile:
+    ///
+    /// ```
+    /// use heimr_core::Currency;
+    /// const USD: Currency = Currency::of("USD");
+    /// assert_eq!(USD.as_str(), "USD");
+    /// ```
+    ///
+    /// ```compile_fail
+    /// const BAD: heimr_core::Currency = heimr_core::Currency::of("usd");
+    /// ```
+    ///
+    /// # Panics
+    /// If `code` is not three upper-case ASCII letters. Outside a `const`,
+    /// use [`Currency::new`].
+    pub const fn of(code: &str) -> Self {
+        match Self::parse(code.as_bytes()) {
+            Some(c) => c,
+            None => panic!("a currency code is three upper-case ASCII letters"),
+        }
+    }
+
+    const fn parse(code: &[u8]) -> Option<Self> {
+        match code {
+            &[a, b, c]
+                if a.is_ascii_uppercase() && b.is_ascii_uppercase() && c.is_ascii_uppercase() =>
+            {
+                Some(Self([a, b, c]))
+            }
+            _ => None,
         }
     }
 

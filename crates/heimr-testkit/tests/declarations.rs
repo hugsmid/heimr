@@ -42,7 +42,7 @@ fn health_only() -> Suite {
 }
 
 /// Every scenario a health-only adapter with fixed settings skips, and the
-/// one it passes with a note.
+/// ones it passes with a note.
 const SKIPS: &[&str] = &[
     "config.invalid_values",
     "config.no_io_in_new",
@@ -55,10 +55,12 @@ const SKIPS: &[&str] = &[
     "fault.rejected_is_fatal",
     "fault.malformed_no_panic",
 ];
-const NOTE: &str = "records.monotonic";
+const NOTES: &[&str] = &["records.monotonic", "records.keep_alive"];
 
 fn declared() -> Suite {
-    let mut s = health_only().expect_note(NOTE, "no upstream to interrupt");
+    let mut s = health_only()
+        .expect_note(NOTES[0], "no upstream to interrupt")
+        .expect_note(NOTES[1], "no record-on-change series");
     for id in SKIPS {
         s = s.expect_skip(id, "nothing to configure, command or fault");
     }
@@ -86,11 +88,10 @@ fn undeclared_skips_and_notes_fail_and_are_named() {
             "{id} missing from\n{msg}"
         );
     }
-    assert!(
-        msg.contains(&format!("- {NOTE}: undeclared note: ")),
-        "{msg}"
-    );
-    assert_eq!(r.problems().len(), SKIPS.len() + 1, "{msg}");
+    for id in NOTES {
+        assert!(msg.contains(&format!("- {id}: undeclared note: ")), "{msg}");
+    }
+    assert_eq!(r.problems().len(), SKIPS.len() + NOTES.len(), "{msg}");
 }
 
 #[test]
@@ -98,12 +99,12 @@ fn declarations_make_it_pass() {
     let r = declared().run();
     assert_eq!(assert_message(&r), None, "{r}");
     assert_eq!(r.count(Status::Skipped), SKIPS.len());
-    assert_eq!(r.count(Status::PassedWithNote), 1);
-    assert_eq!(r.declared(), SKIPS.len() + 1);
+    assert_eq!(r.count(Status::PassedWithNote), NOTES.len());
+    assert_eq!(r.declared(), SKIPS.len() + NOTES.len());
     let summary = r.to_string();
     let last = summary.lines().last().unwrap();
     assert!(
-        last.contains("10 skipped") && last.contains("11 as declared, 0 problems"),
+        last.contains("10 skipped") && last.contains("12 as declared, 0 problems"),
         "{last}"
     );
 }
@@ -172,18 +173,61 @@ fn only_child() {
     r.assert_passed();
 }
 
-fn run_child(only: &str) -> (bool, String) {
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "only_child", "--ignored", "--nocapture"])
+/// Run `only_child` with `ONLY_ENV` set and, if `ci` is given, `CI` set
+/// to it; otherwise without `CI`, whatever the parent has (CI services set
+/// it, and the filter is refused under it).
+fn run_child_with(only: &str, ci: Option<&str>) -> (bool, String) {
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", "only_child", "--ignored", "--nocapture"])
         .env(ONLY_ENV, only)
-        .output()
-        .unwrap();
+        .env_remove("CI");
+    if let Some(ci) = ci {
+        cmd.env("CI", ci);
+    }
+    let out = cmd.output().unwrap();
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     (out.status.success(), text)
+}
+
+fn run_child(only: &str) -> (bool, String) {
+    run_child_with(only, None)
+}
+
+/// Under CI the filter is refused and every scenario runs.
+#[test]
+fn only_is_refused_under_ci() {
+    let (ok, text) = run_child_with("descriptor.valid", Some("true"));
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("HEIMR_TESTKIT_ONLY is set in CI (\"descriptor.valid\"); every scenario was run: unset it"),
+        "{text}"
+    );
+}
+
+/// The filter tests themselves pass when the parent runs under CI.
+#[test]
+fn the_filter_tests_pass_under_ci() {
+    for test in [
+        "only_with_an_unknown_id_fails",
+        "only_filters_without_enforcing_other_declarations",
+    ] {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test])
+            .env("CI", "true")
+            .env_remove(ONLY_ENV)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{test} under CI=true:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]

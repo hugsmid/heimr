@@ -11,7 +11,7 @@ use std::time::Duration;
 use heimr::{APP_SOURCE, App, Config, MemorySink, Telemetry};
 use heimr_core::{
     AdapterDescriptor, AdapterError, AdapterFactory, AdapterInstance, AdapterStats, AuditRecord,
-    BoxFuture, Capabilities, Command, CommandRequest, CommandSubmitter, Envelope, Event,
+    BoxFuture, Capabilities, Command, CommandRequest, CommandSubmitter, Currency, Envelope, Event,
     ManualClock, MemoryAuditLog, Mode, Outcome, Record, Rejection, SharedClock, ShutdownTrigger,
     Site, TokioClock,
 };
@@ -77,15 +77,18 @@ pub struct DriverOptions {
     pub shutdown_deadline: SignedDuration,
     /// The site the app runs for.
     pub site: Site,
+    /// The app's `forecast_horizon`.
+    pub forecast_horizon: SignedDuration,
 }
 
 impl DriverOptions {
-    /// Paused clock, 1 s deadline, `site`.
+    /// Paused clock, 1 s deadline, `site`, the default forecast horizon.
     pub fn new(site: Site) -> Self {
         Self {
             clock: ClockMode::Paused,
             shutdown_deadline: SignedDuration::from_secs(1),
             site,
+            forecast_horizon: heimr_core::DEFAULT_FORECAST_HORIZON,
         }
     }
 }
@@ -106,6 +109,7 @@ impl AdapterFactory for SharedFactory {
     }
 }
 
+#[derive(Clone)]
 enum Clocks {
     Paused(TokioClock),
     Manual(ManualClock),
@@ -181,6 +185,7 @@ impl InProcess {
         settings: &serde_json::Value,
         mode: Mode,
         dir: &TempDir,
+        currency: Currency,
     ) -> Result<Config, String> {
         let toml::Value::Table(mut instance) = toml::Value::try_from(settings)
             .map_err(|e| format!("settings cannot be written as TOML: {e}"))?
@@ -201,7 +206,7 @@ impl InProcess {
                 "site",
                 table(vec![
                     ("time_zone", site.time_zone_name().into()),
-                    ("currency", site.currency().as_str().into()),
+                    ("currency", currency.as_str().into()),
                 ]),
             ),
             (
@@ -211,6 +216,10 @@ impl InProcess {
                     (
                         "shutdown_grace",
                         self.options.shutdown_deadline.to_string().into(),
+                    ),
+                    (
+                        "forecast_horizon",
+                        self.options.forecast_horizon.to_string().into(),
                     ),
                 ]),
             ),
@@ -253,6 +262,60 @@ impl InProcess {
                 }
             }
         });
+    }
+
+    /// Build and run a fresh app on `dir`, with `keep`'s clock if given
+    /// (else a new one at [`t0`]), on the current upstream.
+    fn launch(&mut self, mode: Mode, dir: TempDir, keep: Option<Clocks>) -> Result<(), String> {
+        let settings = self.upstream().settings();
+        let config = self.config(&settings, mode, &dir, self.options.site.currency())?;
+        let sink = MemorySink::new(1_000_000);
+        let audit = MemoryAuditLog::new();
+        let factory = SharedFactory(self.factory.clone());
+        let clock_mode = self.options.clock;
+        let built = self.rt.block_on({
+            let sink = sink.clone();
+            let audit = audit.clone();
+            async move {
+                let (clocks, shared): (Clocks, SharedClock) = match (keep, clock_mode) {
+                    (Some(Clocks::Paused(c)), _) => (Clocks::Paused(c.clone()), Arc::new(c)),
+                    (Some(Clocks::Manual(c)), _) => (Clocks::Manual(c.clone()), Arc::new(c)),
+                    (None, ClockMode::Paused) => {
+                        let c = TokioClock::starting_at(t0());
+                        (Clocks::Paused(c.clone()), Arc::new(c))
+                    }
+                    (None, ClockMode::Manual { .. }) => {
+                        let c = ManualClock::new(t0());
+                        (Clocks::Manual(c.clone()), Arc::new(c))
+                    }
+                };
+                let app = App::builder(config)
+                    .factory(factory)
+                    .sink(sink)
+                    .audit_log(Arc::new(audit))
+                    .clock(shared)
+                    .build()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((app, clocks))
+            }
+        });
+        let (app, clock) = built?;
+        let telemetry = app.telemetry();
+        let submitter = app.submitter(ACTOR).map_err(|e| e.to_string())?;
+        let trigger = app.shutdown_trigger();
+        let handle = self.rt.spawn(app.run_until(std::future::pending()));
+        self.run = Some(Run {
+            sink,
+            audit,
+            telemetry,
+            submitter,
+            trigger,
+            handle: Some(handle),
+            clock,
+            _dir: dir,
+        });
+        Ok(())
     }
 }
 
@@ -301,6 +364,39 @@ impl Driver for InProcess {
         }
     }
 
+    fn series(&mut self) -> Vec<heimr_core::SeriesTemplate> {
+        let settings = self.settings();
+        let site = self.options.site.clone();
+        let fallback = self.factory.descriptor().series;
+        let fut = self.factory.prepare(&settings, &site);
+        let handle = self.rt.spawn(async move { fut.await.map(|i| i.series()) });
+        match self.rt.block_on(handle) {
+            Ok(Ok(Some(series))) => series,
+            _ => fallback,
+        }
+    }
+
+    fn check_site(&mut self, currency: Currency) -> Result<(), String> {
+        let settings = self.upstream().settings();
+        let dir = TempDir::new("site-check").map_err(|e| e.to_string())?;
+        let config = self.config(&settings, Mode::Shadow, &dir, currency)?;
+        let factory = SharedFactory(self.factory.clone());
+        // In a task, so a panicking adapter is reported, not propagated.
+        let handle = self.rt.spawn(async move {
+            App::builder(config)
+                .factory(factory)
+                .check()
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+        match self.rt.block_on(handle) {
+            Ok(r) => r,
+            Err(e) if e.is_panic() => Err(format!("panicked: {}", panic_message(&*e.into_panic()))),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     fn start(&mut self, mode: Mode) -> Result<(), String> {
         if self.run.as_ref().is_some_and(|r| r.handle.is_some()) {
             self.stop();
@@ -308,54 +404,20 @@ impl Driver for InProcess {
         self.run = None;
         let make = self.upstreams.clone();
         self.upstream = Some(self.rt.block_on(make()));
-        let settings = self.upstream().settings();
         let dir = TempDir::new("conformance").map_err(|e| e.to_string())?;
-        let config = self.config(&settings, mode, &dir)?;
-        let sink = MemorySink::new(1_000_000);
-        let audit = MemoryAuditLog::new();
-        let factory = SharedFactory(self.factory.clone());
-        let clock_mode = self.options.clock;
-        let built = self.rt.block_on({
-            let sink = sink.clone();
-            let audit = audit.clone();
-            async move {
-                let (clocks, shared): (Clocks, SharedClock) = match clock_mode {
-                    ClockMode::Paused => {
-                        let c = TokioClock::starting_at(t0());
-                        (Clocks::Paused(c.clone()), Arc::new(c))
-                    }
-                    ClockMode::Manual { .. } => {
-                        let c = ManualClock::new(t0());
-                        (Clocks::Manual(c.clone()), Arc::new(c))
-                    }
-                };
-                let app = App::builder(config)
-                    .factory(factory)
-                    .sink(sink)
-                    .audit_log(Arc::new(audit))
-                    .clock(shared)
-                    .build()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                Ok::<_, String>((app, clocks))
-            }
-        });
-        let (app, clock) = built?;
-        let telemetry = app.telemetry();
-        let submitter = app.submitter(ACTOR).map_err(|e| e.to_string())?;
-        let trigger = app.shutdown_trigger();
-        let handle = self.rt.spawn(app.run_until(std::future::pending()));
-        self.run = Some(Run {
-            sink,
-            audit,
-            telemetry,
-            submitter,
-            trigger,
-            handle: Some(handle),
-            clock,
-            _dir: dir,
-        });
-        Ok(())
+        self.launch(mode, dir, None)
+    }
+
+    fn restart(&mut self, mode: Mode) -> Result<(), String> {
+        let Some(mut run) = self.run.take() else {
+            return self.start(mode);
+        };
+        run.trigger.trigger();
+        if let Some(handle) = run.handle.take() {
+            let _ = self.rt.block_on(handle);
+        }
+        // Same upstream, state directory and clock: a restart of the app.
+        self.launch(mode, run._dir, Some(run.clock))
     }
 
     fn advance(&mut self, by: SignedDuration) {
@@ -419,6 +481,29 @@ impl Driver for InProcess {
                 .filter(|e| e.source == INSTANCE)
                 .collect()
         })
+    }
+
+    fn runs(&self) -> Vec<Vec<Envelope>> {
+        let Some(run) = &self.run else {
+            return Vec::new();
+        };
+        let mut runs: Vec<Vec<Envelope>> = Vec::new();
+        for e in run.sink.snapshot() {
+            if e.source == APP_SOURCE {
+                if let Record::Event(ev) = &e.record
+                    && ev.kind == Event::ADAPTER_STARTED
+                    && ev.payload["adapter"] == INSTANCE
+                {
+                    runs.push(Vec::new());
+                }
+            } else if e.source == INSTANCE {
+                match runs.last_mut() {
+                    Some(r) => r.push(e),
+                    None => runs.push(vec![e]),
+                }
+            }
+        }
+        runs
     }
 
     fn failures(&self) -> Vec<Failure> {

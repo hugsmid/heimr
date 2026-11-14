@@ -19,9 +19,9 @@
 //!
 //! # async fn run() -> Result<(), weather::Error> {
 //! let client = Client::new()?;
-//! let exeter = Location::new(50.7275, -3.4747)?;
+//! let reykjavik = Location::new(64.15, -21.94)?; // an example location
 //! let points = client
-//!     .forecast(exeter, &ForecastOptions::days(2), IssuedAt::FetchTime)
+//!     .forecast(reykjavik, &ForecastOptions::days(2), IssuedAt::FetchTime)
 //!     .await?;
 //! for p in points.iter().take(24) {
 //!     println!("{} {:?} °C", p.valid_at, p.temperature_c);

@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn location_is_validated() {
-        assert!(Location::new(50.7275, -3.4747).is_ok());
+        assert!(Location::new(64.15, -21.94).is_ok());
         assert!(Location::new(90.5, 0.0).is_err());
         assert!(Location::new(0.0, -180.1).is_err());
         assert!(Location::new(f64::NAN, 0.0).is_err());

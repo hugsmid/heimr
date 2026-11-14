@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use heimr_core::{
-    AdapterDescriptor, AuditResult, Capabilities, ClimateCommand, Command, CommandKind, DeviceId,
-    FanCommand, FanMode, HealthStatus, Hold, Mode, Outcome, Record, RunState, Setpoint,
+    AdapterDescriptor, AuditResult, Capabilities, ClimateCommand, Command, CommandKind, Currency,
+    DeviceId, FanCommand, FanMode, HealthStatus, Hold, Mode, Outcome, Record, RunState, Setpoint,
     SwitchCommand, ZoneId,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -73,12 +73,16 @@ pub struct Expectations {
     /// true).
     pub emits: bool,
     /// How far into the future of the fake clock a record may be stamped
-    /// (default 1 s).
+    /// (default [`heimr_core::MAX_FUTURE_SKEW`], 1 s).
     pub max_future: SignedDuration,
     /// How far into the past a record may be stamped, before the run
     /// started (default 31 days; raise it for adapters that back-fill
     /// history).
     pub max_backfill: SignedDuration,
+    /// How far past its issue time a forecast may reach (default
+    /// [`heimr_core::DEFAULT_FORECAST_HORIZON`]); the in-process driver
+    /// runs the app with this `forecast_horizon`.
+    pub forecast_horizon: SignedDuration,
     /// Commands to submit in the command scenarios. Default: one per
     /// declared kind, addressed to [`Expectations::command_target`].
     pub commands: Option<Vec<Command>>,
@@ -164,8 +168,9 @@ impl Default for Expectations {
             warmup: SignedDuration::from_mins(2),
             shutdown_deadline: SignedDuration::from_secs(1),
             emits: true,
-            max_future: SignedDuration::from_secs(1),
+            max_future: heimr_core::MAX_FUTURE_SKEW,
             max_backfill: SignedDuration::from_hours(31 * 24),
+            forecast_horizon: heimr_core::DEFAULT_FORECAST_HORIZON,
             commands: None,
             command_target: "zone-a".to_owned(),
             outage: SignedDuration::from_mins(2),
@@ -243,6 +248,7 @@ scenarios! {
     "config.rebuild_stable" => "preparing the same settings again gives the same capabilities (every restart rebuilds)", config_rebuild_stable;
     "config.unknown_key" => "an unknown key is refused as a configuration error naming it", config_unknown_key;
     "config.reserved_keys" => "keys owned by the app (type, enabled, mode, safety) and the site (time zone, currency) are not adapter keys", config_reserved_keys;
+    "config.currency_matches_site" => "a kind declaring a source currency runs only for a site in that currency (refused otherwise, naming both); a kind declaring none runs for any site currency", config_currency_matches_site;
     "config.invalid_values" => "every listed invalid setting is refused as a fatal configuration error naming its key", config_invalid_values;
     "config.malformed_no_panic" => "settings of the wrong shape or type are refused without panicking, never as transient errors", config_malformed;
     "config.no_io_in_new" => "building an instance from settings (validation, new) does no upstream I/O", config_no_io_in_new;
@@ -250,9 +256,11 @@ scenarios! {
     "run.emits" => "a healthy run emits records", run_emits;
     "run.reports_health" => "a healthy run reports health, and it is ok", run_reports_health;
     "records.no_refusals" => "the core refuses none of the instance's records", records_no_refusals;
-    "records.well_formed" => "records name the instance, use valid identifiers and finite values, and have sane timestamps", records_well_formed;
-    "records.units" => "well-known metrics use their documented unit; each series keeps one unit", records_units;
-    "records.monotonic" => "reading timestamps strictly increase per series and state never goes back in time, also across the restart or reconnect after an outage", records_monotonic;
+    "records.well_formed" => "records name the instance, use valid identifiers and have sane timestamps; forecasts have ordered periods within the horizon; versioned series carry changed_at, others none; interval series are stamped at interval starts; non-finite values are noted, not failed", records_well_formed;
+    "records.units" => "series templates of well-known metrics use the documented unit; every reading and forecast has a template and uses its unit; money units only from a kind declaring a source currency", records_units;
+    "records.monotonic" => "within a run, readings of a series that is not versioned strictly increase in time; any repeat (across a restart, or on a versioned series) is identical, and a changed value outranks with a higher changed_at on a versioned series; state never goes back in time", records_monotonic;
+    "records.restart" => "after a restart of the app on the same state directory and clock, every repeat is identical and corrections outrank", records_restart;
+    "records.keep_alive" => "a record-on-change series is re-sent at least once per expected interval while unchanged", records_keep_alive;
     "telemetry.counted" => "the core's stats count exactly the records the instance emitted", telemetry_counted;
     "shutdown.prompt" => "after a healthy run, shutdown returns Ok within the deadline", shutdown_prompt;
     "shutdown.any_point" => "shutdown at arbitrary points (start-up, mid-interval, on a tick) returns Ok within the deadline", shutdown_any_point;
@@ -453,7 +461,13 @@ fn config_accepted(cx: &mut ScenarioContext<'_>) -> Verdict {
                 Ok(()) if !kind.includes(&caps) => {
                     Verdict::Fail("instance capabilities exceed the descriptor's".into())
                 }
-                Ok(()) => Verdict::Pass,
+                Ok(()) => {
+                    let series = cx.driver.series();
+                    match cx.driver.descriptor().check_instance_series(&series) {
+                        Ok(()) => Verdict::Pass,
+                        Err(e) => Verdict::Fail(e.to_string()),
+                    }
+                }
             }
         }
         Err(f) => Verdict::Fail(format!("example settings refused: {}", describe(&f))),
@@ -520,6 +534,46 @@ fn config_reserved_keys(cx: &mut ScenarioContext<'_>) -> Verdict {
         if let Some(problem) = expect_unknown_key(cx, key, json!("Europe/Berlin")) {
             p.push(problem);
         }
+    }
+    fail(p)
+}
+
+/// ISO 4217's code for testing: no real site quotes it.
+const TEST_CURRENCY: Currency = Currency::of("XTS");
+/// ISO 4217's code for "no currency", the fallback when a kind quotes XTS.
+const NO_CURRENCY: Currency = Currency::of("XXX");
+
+/// The app does the matching; this checks the adapter does not get in its
+/// way (a kind without a source currency must not check the site's
+/// currency itself) and that the declared currency is honoured.
+fn config_currency_matches_site(cx: &mut ScenarioContext<'_>) -> Verdict {
+    let Some(quoted) = cx.driver.descriptor().source_currency else {
+        return match cx.driver.check_site(TEST_CURRENCY) {
+            Ok(()) => Verdict::Pass,
+            Err(e) => Verdict::Fail(format!(
+                "refused a site quoting {TEST_CURRENCY}, though the kind declares no source currency (declare source_currency in the descriptor instead): {e}"
+            )),
+        };
+    };
+    let mut p = Vec::new();
+    if let Err(e) = cx.driver.check_site(quoted) {
+        p.push(format!(
+            "refused a site quoting its own source currency {quoted}: {e}"
+        ));
+    }
+    let other = if quoted == TEST_CURRENCY {
+        NO_CURRENCY
+    } else {
+        TEST_CURRENCY
+    };
+    match cx.driver.check_site(other) {
+        Ok(()) => p.push(format!(
+            "accepted a site quoting {other}, though the kind quotes {quoted}"
+        )),
+        Err(e) if !(e.contains(quoted.as_str()) && e.contains(other.as_str())) => p.push(format!(
+            "refused a site quoting {other} without naming both currencies: {e}"
+        )),
+        Err(_) => {}
     }
     fail(p)
 }
@@ -695,8 +749,10 @@ fn records_no_refusals(cx: &mut ScenarioContext<'_>) -> Verdict {
         Verdict::Pass
     } else {
         Verdict::Fail(format!(
-            "{} records refused ({} for provenance)",
-            s.emit_errors, s.provenance_rejections
+            "{} records refused ({} for provenance); last: {}",
+            s.emit_errors,
+            s.provenance_rejections,
+            s.last_emit_error.unwrap_or_default()
         ))
     };
     finish(cx, v)
@@ -716,12 +772,28 @@ fn records_well_formed(cx: &mut ScenarioContext<'_>) -> Verdict {
         .checked_add(cx.expect.max_future)
         .unwrap_or(Timestamp::MAX);
     let instance = cx.driver.instance().to_owned();
-    let v = fail(checks::well_formed(
+    let records = cx.driver.records();
+    let mut problems = checks::well_formed(
         &instance,
-        &cx.driver.records(),
+        &records,
         earliest,
         latest,
-    ));
+        cx.expect.forecast_horizon,
+    );
+    let series = cx.driver.descriptor().series;
+    problems.extend(checks::versioning(&records, &series));
+    problems.extend(checks::intervals(&records, &series));
+    // Passed through, not refused: worth a note, never a failure.
+    let odd = checks::non_finite(&records);
+    let notes = if odd.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!(
+            "non-finite values passed through (the store will record them as bad quality): {}",
+            odd.join("; ")
+        )]
+    };
+    let v = noted(problems, notes);
     finish(cx, v)
 }
 
@@ -729,16 +801,22 @@ fn records_units(cx: &mut ScenarioContext<'_>) -> Verdict {
     if let Err(v) = healthy_run(cx) {
         return v;
     }
-    let v = fail(checks::units(&cx.driver.records()));
+    let d = cx.driver.descriptor();
+    let v = fail(checks::units(
+        &cx.driver.records(),
+        &d.series,
+        d.source_currency,
+    ));
     finish(cx, v)
 }
 
 /// A healthy run, then (where the upstream can simulate one) an outage and
-/// the recovery after it, checked as one sequence: whatever the adapter
-/// does to recover (reconnect inside `run`, or return an error and be
-/// restarted by the supervisor), it must not repeat or reorder readings.
-/// Restarts of the whole app are out of reach: each run starts a fresh
-/// app and clock.
+/// the recovery after it, checked as one sequence of runs: whatever the
+/// adapter does to recover (reconnect inside `run`, or return an error and
+/// be restarted by the supervisor), repeats must be identical and
+/// corrections must outrank ([`checks::monotonic`]). Restarts of the whole
+/// app are out of reach here: each scenario starts a fresh app and clock;
+/// test them with [`Harness::restart`](crate::Harness::restart).
 fn records_monotonic(cx: &mut ScenarioContext<'_>) -> Verdict {
     if let Err(e) = cx.driver.start(Mode::Shadow) {
         return Verdict::Fail(format!("could not start: {e}"));
@@ -758,7 +836,99 @@ fn records_monotonic(cx: &mut ScenarioContext<'_>) -> Verdict {
                 .to_owned(),
         );
     }
-    let v = noted(checks::monotonic(&cx.driver.records()), unobserved);
+    let series = cx.driver.descriptor().series;
+    let v = noted(checks::monotonic(&cx.driver.runs(), &series), unobserved);
+    finish(cx, v)
+}
+
+/// A restart of the whole app: a healthy run, then the instance started
+/// again on the same state directory, upstream and clock, judged as one
+/// sequence of runs ([`checks::monotonic`]). This is where what an adapter
+/// keeps in its state directory (revision markers, first sightings) must
+/// survive: re-sent records must be bit-identical.
+fn records_restart(cx: &mut ScenarioContext<'_>) -> Verdict {
+    if let Err(v) = healthy_run(cx) {
+        return v;
+    }
+    let mut runs = cx.driver.runs();
+    if let Err(e) = cx.driver.restart(Mode::Shadow) {
+        return finish(cx, Verdict::Skip(e));
+    }
+    cx.driver.advance(cx.expect.warmup);
+    runs.extend(cx.driver.runs());
+    let series = cx.driver.descriptor().series;
+    let v = fail(checks::monotonic(&runs, &series));
+    finish(cx, v)
+}
+
+/// Record-on-change series must send a keep-alive at least once per
+/// expected interval while the value is unchanged. Runs a healthy instance
+/// for four of the longest such intervals on the fake clock and measures,
+/// per series (device, metric), every gap between reading times, from the
+/// start to the first and from the last to the end. Passes with a note
+/// when no template is record-on-change (polled series keep themselves
+/// alive), and fails a record-on-change metric nothing emitted: the
+/// instance's templates name only what it emits ([`Driver::series`]).
+fn records_keep_alive(cx: &mut ScenarioContext<'_>) -> Verdict {
+    // The instance's templates: its configuration sets the intervals.
+    let series: Vec<_> = cx
+        .driver
+        .series()
+        .into_iter()
+        .filter(|t| t.record_on_change && !t.for_forecasts())
+        .collect();
+    let Some(longest) = series.iter().map(|t| t.expected_interval).max() else {
+        return Verdict::PassWithNote(
+            "no series template is record-on-change: nothing needs a keep-alive".into(),
+        );
+    };
+    let started = cx.driver.now();
+    if let Err(e) = cx.driver.start(Mode::Shadow) {
+        return Verdict::Fail(format!("could not start: {e}"));
+    }
+    let span = longest.checked_mul(4).unwrap_or(longest);
+    cx.driver.advance(span);
+    let end = cx.driver.now();
+    let records = cx.driver.records();
+    let mut problems = Vec::new();
+    for t in &series {
+        let mut by_device: BTreeMap<String, Vec<Timestamp>> = BTreeMap::new();
+        for env in &records {
+            if let Record::Reading(r) = &env.record
+                && r.metric == t.metric
+            {
+                by_device
+                    .entry(r.device.to_string())
+                    .or_default()
+                    .push(r.time);
+            }
+        }
+        // The instance declares the template, so it emits the metric: a
+        // record-on-change source sends its state at start, then keeps it
+        // alive.
+        if by_device.is_empty() {
+            problems.push(format!(
+                "{}: record-on-change, but nothing emitted in {span:#}",
+                t.metric
+            ));
+        }
+        for (device, mut times) in by_device {
+            times.sort();
+            let mut prev = started;
+            for at in times.into_iter().chain([end]) {
+                let gap = at.duration_since(prev);
+                if gap > t.expected_interval {
+                    problems.push(format!(
+                        "{device}/{}: silent for {gap:#} from {prev} to {at}, longer than its keep-alive interval {:#}",
+                        t.metric, t.expected_interval
+                    ));
+                    break;
+                }
+                prev = prev.max(at);
+            }
+        }
+    }
+    let v = fail(problems);
     finish(cx, v)
 }
 
@@ -772,19 +942,21 @@ fn telemetry_counted(cx: &mut ScenarioContext<'_>) -> Verdict {
     }
     let s = cx.driver.stop();
     let records = cx.driver.records();
-    let (mut readings, mut states, mut events) = (0u64, 0u64, 0u64);
+    let (mut readings, mut forecasts, mut states, mut events) = (0u64, 0u64, 0u64, 0u64);
     for env in &records {
         match env.record {
             Record::Reading(_) => readings += 1,
+            Record::Forecast(_) => forecasts += 1,
             Record::Event(_) => events += 1,
             _ => states += 1,
         }
     }
     let mut p = Vec::new();
-    if (s.readings, s.states, s.events) != (readings, states, events) {
+    let counted = (s.readings, s.forecasts, s.states, s.events);
+    if counted != (readings, forecasts, states, events) {
         p.push(format!(
-            "stats count {}/{}/{} readings/states/events, sink saw {readings}/{states}/{events}",
-            s.readings, s.states, s.events
+            "stats count {}/{}/{}/{} readings/forecasts/states/events, sink saw {readings}/{forecasts}/{states}/{events}",
+            s.readings, s.forecasts, s.states, s.events
         ));
     }
     let newest = records.iter().map(|e| e.record.time()).max();
@@ -993,11 +1165,13 @@ fn commands_live(cx: &mut ScenarioContext<'_>) -> Verdict {
     fail(p)
 }
 
-fn readings_after(cx: &ScenarioContext<'_>, t: Timestamp) -> usize {
+/// How many records other than events the instance has emitted so far.
+/// Counted by arrival, not by timestamp: a re-sent record keeps its time.
+fn emitted(cx: &ScenarioContext<'_>) -> usize {
     cx.driver
         .records()
         .iter()
-        .filter(|e| !matches!(e.record, Record::Event(_)) && e.record.time() > t)
+        .filter(|e| !matches!(e.record, Record::Event(_)))
         .count()
 }
 
@@ -1021,7 +1195,7 @@ fn fault_transient_recovers(cx: &mut ScenarioContext<'_>) -> Verdict {
         p.push("health stayed ok throughout the outage".to_owned());
     }
     cx.driver.inject(None);
-    let cleared = cx.driver.now();
+    let cleared = emitted(cx);
     cx.driver.advance(cx.expect.recovery);
     let s = cx.driver.stats();
     if s.run_state == RunState::Down {
@@ -1029,7 +1203,7 @@ fn fault_transient_recovers(cx: &mut ScenarioContext<'_>) -> Verdict {
             "kept down after an outage: {}",
             s.exit_error.unwrap_or_default()
         ));
-    } else if cx.expect.emits && readings_after(cx, cleared) == 0 {
+    } else if cx.expect.emits && emitted(cx) == cleared {
         p.push(format!(
             "emitted nothing within {:#} of the outage ending",
             cx.expect.recovery
@@ -1141,6 +1315,7 @@ fn fault_malformed(cx: &mut ScenarioContext<'_>) -> Verdict {
         &cx.driver.records(),
         Timestamp::MIN,
         Timestamp::MAX,
+        cx.expect.forecast_horizon,
     ));
     finish(cx, fail(p))
 }

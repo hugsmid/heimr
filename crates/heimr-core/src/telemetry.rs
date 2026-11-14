@@ -93,6 +93,8 @@ pub struct AdapterStats {
     pub next_restart_at: Option<Timestamp>,
     /// Readings emitted.
     pub readings: u64,
+    /// Forecasts emitted.
+    pub forecasts: u64,
     /// State records emitted.
     pub states: u64,
     /// Events emitted (including health reports).
@@ -102,6 +104,8 @@ pub struct AdapterStats {
     /// Records refused for naming another source or actor, or a reserved
     /// event kind (also counted in `emit_errors`).
     pub provenance_rejections: u64,
+    /// Why the most recent emit failed, if one has.
+    pub last_emit_error: Option<String>,
     /// Timestamp of the newest record emitted.
     pub last_emit_at: Option<Timestamp>,
     /// Commands submitted for this instance.
@@ -242,6 +246,7 @@ impl StatsHandle {
         let mut s = self.lock();
         match record {
             Record::Reading(_) => s.readings += 1,
+            Record::Forecast(_) => s.forecasts += 1,
             Record::Climate(_) | Record::Fan(_) | Record::Switch(_) => s.states += 1,
             Record::Event(_) => s.events += 1,
         }
@@ -251,12 +256,13 @@ impl StatsHandle {
         }
     }
 
-    pub(crate) fn emit_failed(&self, provenance: bool) {
+    pub(crate) fn emit_failed(&self, error: &EmitError) {
         let mut s = self.lock();
         s.emit_errors += 1;
-        if provenance {
+        if error.is_provenance() {
             s.provenance_rejections += 1;
         }
+        s.last_emit_error = Some(error.to_string());
     }
 
     pub(crate) fn command(&self, result: &Result<Outcome, Rejection>) {
@@ -418,7 +424,13 @@ mod tests {
     async fn emitter_counts_and_health_dedupes() {
         let (tx, mut rx) = mpsc::channel(16);
         let stats = StatsHandle::new("a", "test", Mode::Shadow);
-        let em = Emitter::for_adapter("a", tx).with_stats(stats.clone());
+        let em = Emitter::for_adapter("a", tx)
+            .with_stats(stats.clone())
+            .with_series([crate::SeriesTemplate::gauge(
+                Metric::TEMPERATURE,
+                Unit::Celsius,
+                jiff::SignedDuration::from_mins(1),
+            )]);
         let dev = DeviceId::new("d").unwrap();
         let ok = Reading::new(
             t0(),
@@ -438,8 +450,16 @@ mod tests {
             Unit::Celsius,
         );
         assert!(em.emit(foreign).await.is_err());
-        let nan = Reading::new(t0(), "a", dev, Metric::TEMPERATURE, f64::NAN, Unit::Celsius);
-        assert!(em.emit(nan).await.is_err());
+        // Money from a kind that declares no currency is refused.
+        let money = Reading::new(
+            t0(),
+            "a",
+            dev,
+            Metric::new("price").unwrap(),
+            0.2,
+            Unit::CurrencyPerKilowattHour,
+        );
+        assert!(em.emit(money).await.is_err());
 
         let clock = ManualClock::new(t0());
         let health = HealthReporter::new(stats.clone(), em.clone(), Arc::new(clock.clone()));

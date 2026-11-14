@@ -231,8 +231,16 @@ impl Default for SetpointBand {
     }
 }
 
-/// Unit of a [`Reading`](crate::Reading) value. Serialised as its symbol
-/// (`"°C"`, `"%"`, `"µg/m³"`, …), which is also what the store keeps.
+/// Unit of a [`Reading`](crate::Reading) or [`Forecast`](crate::Forecast)
+/// value. Serialised as its symbol (`"°C"`, `"%"`, `"µg/m³"`, …), which is
+/// also how the store will keep it.
+///
+/// Money units ([`Unit::is_money`]) are in the **major unit of the site's
+/// currency** (0.184, not 18.4 in a minor unit such as cents); the symbol `¤` stands for
+/// that currency. Only an adapter kind that declares the currency its
+/// source quotes
+/// ([`AdapterDescriptor::source_currency`](crate::AdapterDescriptor::source_currency))
+/// may emit them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Unit {
@@ -293,6 +301,20 @@ pub enum Unit {
     /// Dimensionless count, level or ratio.
     #[serde(rename = "1")]
     Dimensionless,
+    /// Watts per square metre (irradiance, e.g. shortwave radiation).
+    #[serde(rename = "W/m²")]
+    WattPerSquareMetre,
+    /// Degrees of angle (a direction, e.g. where the wind blows from,
+    /// clockwise from north).
+    #[serde(rename = "°")]
+    Degree,
+    /// An amount of money in the site currency's major unit (e.g. a daily
+    /// standing charge).
+    #[serde(rename = "¤")]
+    Currency,
+    /// A price per kilowatt-hour in the site currency's major unit.
+    #[serde(rename = "¤/kWh")]
+    CurrencyPerKilowattHour,
 }
 
 impl Unit {
@@ -317,6 +339,10 @@ impl Unit {
         Self::Byte,
         Self::BytePerSecond,
         Self::Dimensionless,
+        Self::WattPerSquareMetre,
+        Self::Degree,
+        Self::Currency,
+        Self::CurrencyPerKilowattHour,
     ];
 
     /// The unit's symbol, as stored.
@@ -341,7 +367,22 @@ impl Unit {
             Self::Byte => "B",
             Self::BytePerSecond => "B/s",
             Self::Dimensionless => "1",
+            Self::WattPerSquareMetre => "W/m²",
+            Self::Degree => "°",
+            Self::Currency => "¤",
+            Self::CurrencyPerKilowattHour => "¤/kWh",
         }
+    }
+
+    /// Whether values in this unit are money (in the site currency).
+    ///
+    /// ```
+    /// use heimr_core::Unit;
+    /// assert!(Unit::CurrencyPerKilowattHour.is_money());
+    /// assert!(!Unit::KilowattHour.is_money());
+    /// ```
+    pub fn is_money(self) -> bool {
+        matches!(self, Self::Currency | Self::CurrencyPerKilowattHour)
     }
 }
 
@@ -462,6 +503,17 @@ mod tests {
         assert!(serde_json::from_str::<SetpointBand>(r#"{"min": 20, "max": 19}"#).is_err());
         assert!(SetpointBand::ENVELOPE.includes(&SetpointBand::DEFAULT));
         assert!(!SetpointBand::DEFAULT.includes(&SetpointBand::ENVELOPE));
+    }
+
+    #[test]
+    fn irradiance_and_direction_units() {
+        assert_eq!(
+            serde_json::to_string(&Unit::WattPerSquareMetre).unwrap(),
+            "\"W/m²\""
+        );
+        assert_eq!(serde_json::to_string(&Unit::Degree).unwrap(), "\"°\"");
+        assert_eq!(serde_json::from_str::<Unit>("\"°\"").unwrap(), Unit::Degree);
+        assert!(!Unit::Degree.is_money() && !Unit::WattPerSquareMetre.is_money());
     }
 
     #[test]
